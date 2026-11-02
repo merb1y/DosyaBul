@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dosyabul"
+version = "1.7.0"
+description = "Windows için Rofi tarzı uygulama, komut ve dosya arama"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6,<7"]
+
+[project.gui-scripts]
+dosyabul = "dosyabul.__main__:main"
+
+[tool.setuptools]
+packages = ["dosyabul"]
