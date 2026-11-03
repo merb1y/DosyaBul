@@ -32,6 +32,7 @@ from . import tray as tray_module
 
 PLACEHOLDER = "Ara…"
 APP_REFRESH_INTERVAL = 15.0
+ICON_PREFETCH_LIMIT = 150
 
 MODE_ALL = "Tümü"
 MODE_APPS = "Uygulamalar"
@@ -141,6 +142,7 @@ class FinderApp:
         self._settings_hotkey_spec: HotkeySpec | None = None
         self._theme = self._resolve_theme()
         self._icon_cache: dict[str, object] = {}
+        self._icon_data_cache: dict[str, tuple] = {}
         self._tray = None
         self._idle_status = self._ready_status()
 
@@ -161,6 +163,7 @@ class FinderApp:
             self._start_application_refresh()
             if self._needs_initial_scan() or self.settings.refresh_on_start:
                 self._auto_after = root.after(80, self.start_scan)
+            threading.Thread(target=self._warmup_first_use, daemon=True, name="DosyaBul-Warmup").start()
         root.protocol("WM_DELETE_WINDOW", self._on_window_close)
         if self._hotkey:
             self.hotkey_available = self._hotkey.start()
@@ -170,6 +173,10 @@ class FinderApp:
                 if not auto_start:
                     self.status_var.set(self._idle_status)
         if start_hidden:
+            # Pencereyi simdi olusturup gizle: ilk Alt+F2'de DWM/ilk boyama
+            # gecikmesi yasanmasin.
+            root.update_idletasks()
+            root.deiconify()
             root.withdraw()
         else:
             root.after(90, self.show_popup)
@@ -283,12 +290,18 @@ class FinderApp:
         return image
 
     def _load_app_icon(self, path):
-        """Bir uygulama/kısayol yolundan gerçek ikonu yükler (önbellekli)."""
+        """Bir uygulama/kısayol yolundan gerçek ikonu yükler (önbellekli).
+
+        Ham ikon verisi arka planda önceden yüklendiyse UI thread'i yalnızca
+        hızlı PhotoImage dönüşümünü yapar; Shell/COM çağrısı yapmaz.
+        """
         key = str(path).casefold()
         if key in self._icon_cache:
             return self._icon_cache[key]
         image = None
-        data = icons.load_icon(path)
+        data = self._icon_data_cache.pop(key, None)
+        if data is None:
+            data = icons.load_icon(path)
         if data is not None:
             width, height, rgba = data
             image = self._rgba_photo(width, height, rgba, self._theme.background)
@@ -1452,9 +1465,50 @@ class FinderApp:
                 self.events.put(("apps_ready", error))
             else:
                 self.events.put(("apps_ready", None))
+                self._prefetch_icon_data()
 
         self._app_thread = threading.Thread(target=work, daemon=True, name="DosyaBul-Uygulamalar")
         self._app_thread.start()
+
+    def _warmup_first_use(self):
+        """Ilk aramada yasanan disk/SQLite gecikmesini arka planda oder."""
+        try:
+            self.database.search(("e",), limit=8)
+        except Exception:
+            logging.debug("Arama warmup basarisiz", exc_info=True)
+
+    def _prefetch_icon_data(self):
+        """Uygulama ikonlarinin ham verisini arka planda onbellege alir.
+
+        UI thread'i ilk sonuc gosteriminde yalnizca PhotoImage donusumunu
+        yapsin diye Shell/COM cagrilari burada, is parcaginda yapilir.
+        """
+        try:
+            icons.warm_up()
+        except Exception:
+            logging.debug("Ikon warmup basarisiz", exc_info=True)
+            return
+        loaded = 0
+        try:
+            applications = self.applications.all()
+        except Exception:
+            return
+        for app in applications:
+            if loaded >= ICON_PREFETCH_LIMIT:
+                break
+            target = app.target
+            if not target or not os.path.isfile(target):
+                continue
+            key = str(target).casefold()
+            if key in self._icon_data_cache or key in self._icon_cache:
+                continue
+            try:
+                data = icons.load_icon(target)
+            except Exception:
+                continue
+            if data is not None:
+                self._icon_data_cache[key] = data
+                loaded += 1
 
     def _refresh_applications_if_stale(self):
         """Panel acilirken uygulama listesini en fazla 15 saniyede bir sessizce yeniler."""

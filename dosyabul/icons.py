@@ -463,3 +463,20 @@ def load_icon(path):
         return _image_from_shell_item(path)
     except OSError:
         return None
+
+
+def warm_up():
+    """COM ve Shell ikon hizmetini bu is parcaginda hazirlar.
+
+    Ilk load_icon cagrisi COM baslatma ve Shell DLL yuklemeyi de ustlendigi
+    icin UI thread'inde ilk sonuc gosterimini geciktirir; acilista arka
+    planda bir kez cagrilarak bu gecikme onceden oder.
+    """
+    if os.name != "nt" or _shell32 is None:
+        return
+    _ensure_com()
+    explorer = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "explorer.exe")
+    try:
+        _icon_handle_for(explorer)
+    except OSError:
+        pass

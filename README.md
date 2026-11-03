@@ -1,4 +1,4 @@
-# DosyaBul 1.11.1 — Windows için Rofi tarzı arama
+# DosyaBul 1.11.2 — Windows için Rofi tarzı arama
 
 Ekranın ortasında küçük bir panel olarak açılan; uygulama, komut, dosya, pencere ve web araması yapan yerel Windows başlatıcısı.
 
