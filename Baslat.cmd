@@ -6,8 +6,8 @@ set "_PYI_PARENT_PROCESS_LEVEL="
 set "_PYI_SPLASH_IPC="
 set "TCL_LIBRARY="
 set "TK_LIBRARY="
-if exist "%~dp0dist\DosyaBul.exe" (
-    start "" "%~dp0dist\DosyaBul.exe"
+if exist "%~dp0dist\DosyaBul\DosyaBul.exe" (
+    start "" "%~dp0dist\DosyaBul\DosyaBul.exe"
     exit /b 0
 )
 where pythonw >nul 2>nul
@@ -22,6 +22,6 @@ if not errorlevel 1 (
 )
 echo DosyaBul'u başlatmak için Python 3.10 veya daha yenisi gerekiyor.
 echo Python'u https://www.python.org/downloads/windows/ adresinden kurabilirsin.
-echo Alternatif: dist klasöründeki DosyaBul.exe Python gerektirmez.
+echo Alternatif: dist\DosyaBul klasöründeki DosyaBul.exe Python gerektirmez.
 pause
 exit /b 1

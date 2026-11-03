@@ -14,7 +14,8 @@ Remove-Item Env:_PYI_SPLASH_IPC -ErrorAction SilentlyContinue
 Remove-Item Env:TCL_LIBRARY -ErrorAction SilentlyContinue
 Remove-Item Env:TK_LIBRARY -ErrorAction SilentlyContinue
 
-$source = Join-Path $PSScriptRoot 'dist\DosyaBul.exe'
+$sourceDir = Join-Path $PSScriptRoot 'dist\DosyaBul'
+$source = Join-Path $sourceDir 'DosyaBul.exe'
 if (-not (Test-Path -LiteralPath $source)) {
     throw "Dosya bulunamadı: $source`nÖnce ExeOlustur.ps1 çalıştırılmalı."
 }
@@ -40,7 +41,8 @@ New-Item -ItemType Directory -Path $ProgramsDir -Force | Out-Null
 $copied = $false
 for ($attempt = 1; $attempt -le 20 -and -not $copied; $attempt++) {
     try {
-        Copy-Item -LiteralPath $source -Destination $target -Force
+        # onedir modunda exe ve _internal klasörünün tamamı kopyalanır.
+        Copy-Item -Path (Join-Path $sourceDir '*') -Destination $installDir -Recurse -Force
         $copied = $true
     } catch [System.IO.IOException] {
         if ($attempt -eq 20) { throw }

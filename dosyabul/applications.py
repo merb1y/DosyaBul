@@ -165,14 +165,21 @@ class ApplicationIndex:
         self._applications = builtin_applications()
 
     def refresh(self, *, directories=None, include_start_apps: bool = True):
-        candidates = list(builtin_applications())
-        candidates.extend(scan_start_menu(directories))
+        # Kurulu uygulamalar once gelir: ayni ada sahip yeni kurulan bir program,
+        # yerlesik komut tanimi tarafindan golgelenmemeli.
+        candidates = list(scan_start_menu(directories))
         if include_start_apps:
             candidates.extend(query_start_apps())
+        candidates.extend(builtin_applications())
         unique = {}
         for app in candidates:
             signature = fold_text(app.name)
-            unique.setdefault(signature, app)
+            existing = unique.get(signature)
+            if existing is None:
+                unique[signature] = app
+            elif app.priority < existing.priority:
+                # Ayni isimde kurulu hedef korunur, en iyi siralama onceligi tasinir.
+                unique[signature] = replace(existing, priority=app.priority)
         ordered = tuple(sorted(unique.values(), key=lambda app: (fold_text(app.name), app.target.casefold())))
         with self._lock:
             self._applications = ordered

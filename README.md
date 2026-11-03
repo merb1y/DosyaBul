@@ -1,10 +1,10 @@
-# DosyaBul 1.7.0 — Windows için Rofi tarzı arama
+# DosyaBul 1.9.0 — Windows için Rofi tarzı arama
 
 Ekranın ortasında küçük bir panel olarak açılan; uygulama, komut, dosya, pencere ve web araması yapan yerel Windows başlatıcısı.
 
 ## Kullanım
 
-1. `dist\DosyaBul.exe` dosyasını aç.
+1. `dist\DosyaBul\DosyaBul.exe` dosyasını aç.
 2. Daha sonra paneli açmak veya gizlemek için varsayılan **Alt + F2** tuşlarına bas.
 3. Uygulama, dosya ya da klasör adını yaz; `Enter` veya çift tık ile aç.
 4. `Esc` paneli gizler. Uygulama arka planda hazır kalır.
@@ -17,8 +17,8 @@ Rofi'nin "modi" yapısına benzer bir kip sistemi vardır. Kipi **Tab** veya **C
 
 | Kip | İşlev |
 | --- | --- |
-| Tümü | Uygulama, dosya, komut, web ve pencereleri birlikte arar |
-| Uygulamalar | Yalnızca başlat menüsü/UWP uygulamaları |
+| Tümü | Uygulama, dosya, komut, web ve pencereleri birlikte arar; boşken son kullanılanları gösterir |
+| Uygulamalar | **Ana sayfa**: başlat menüsü/UWP uygulamaları; boşken son kullanılanlar. `/komut` yazılırsa komut da çalışır |
 | Dosyalar | Yalnızca indekslenmiş dosya ve klasörler |
 | Komutlar | `/komut` yazarak terminale gönder |
 | Web | Doğrudan web araması veya adres açma |
@@ -39,14 +39,15 @@ Uygulama açılışta sistem tepsisine bir ikon ekler:
 - **Vurgu rengi**: Arama kutusunu, panel çerçevesini ve seçimi boyar. Hazır renk düğmeleri (Mavi, Mor, Yeşil, Turkuaz, Kırmızı, Turuncu, Sarı, Pembe) veya serbest `#RRGGBB` kodu. "Tema rengi" düğmesi temanın rengine döner.
 - Panel genişliği, görünür satır sayısı, yazı boyutu, satır yüksekliği ve saydamlık ayarlanabilir.
 
-Sonuçlarda uygulamalar Windows'tan çıkarılan **gerçek logolarıyla** gösterilir; logo bulunamazsa genel uygulama ikonuna düşülür.
+Sonuçlarda uygulamalar Windows'tan çıkarılan **gerçek logolarıyla** gösterilir; Başlat menüsü kısayollarındaki sol alt köşe "kısayol oku" yerleşimi çizilmez. Logo bulunamazsa genel uygulama ikonuna düşülür.
 
 ## Uygulamalar ve terminal komutları
 
 - `terminal` yazıldığında WezTerm ilk sırada; ardından Windows Terminal, PowerShell ve Komut İstemi gösterilir.
-- Başlat menüsü kısayolları, klasik masaüstü uygulamaları ve `Get-StartApps` ile bulunan Windows uygulamaları aranır.
+- Başlat menüsü kısayolları, klasik masaüstü uygulamaları ve `Get-StartApps` ile bulunan Windows uygulamaları aranır. Aynı ada sahip kayıtlı bir uygulama varsa yerleşik tanım yerine o kullanılır.
 - Başına `/` koyulan ifade terminal komutudur. Örneğin `/oc` sonucu seçilip `Enter` basıldığında **WezTerm** açılır ve `oc` komutu PowerShell profiliyle çalıştırılır.
-- `/git status`, `/python --version` gibi komutlar da aynı şekilde çalışır.
+- `/git status`, `/python --version` gibi komutlar da aynı şekilde çalışır. `Uygulamalar` kipinde de `/` ile başlayan ifade komut olarak işlenir; yani dosya indeksine dokunmadan hızlıca komut çalıştırabilirsin.
+- Panel boş sorguyla açıldığında DosyaBul'dan **en son açılan 5 uygulama ve komut** "Son kullanılanlar" olarak listelenir; `Enter` ile doğrudan yeniden açılabilir. Bu liste `%LOCALAPPDATA%\DosyaBul\history.json` dosyasında saklanır.
 
 Komut, kullanıcı tarafından açıkça yazıldığı biçimde WezTerm içindeki PowerShell'e gönderilir. Güvenmediğin komutları çalıştırma. Ayarlardan WezTerm, Windows Terminal veya doğrudan PowerShell seçilebilir; komutların çalışma klasörü de değiştirilebilir.
 
@@ -134,13 +135,14 @@ Bu uygulama Rofi kodunu içermez; Tkinter ve Windows API ile aynı etkileşim ya
 ## Arama ve indeks davranışı
 
 - Klasör seçmek gerekmez. C:, D:, USB ve eşlenmiş Windows sürücüleri otomatik algılanır.
-- Uygulamalar, dosyalar ve klasörler aynı listede aranır; uygulamalar önce gösterilir.
+- Panel **Uygulamalar** kipinde açılır: ana sayfada dosya indeksine hiç dokunulmaz, bu yüzden uygulama araması anında yanıt verir. Dosya araması için `Ctrl+Tab` ile **Dosyalar** veya **Tümü** kipine geç.
+- Uygulamalar, dosyalar ve klasörler aynı listede aranır; uygulamalar önce gösterilir (Tümü kipinde).
 - Dosya indeksi yoksa ilk açılışta yalnızca bir kez arka planda hazırlanır.
 - Sonraki açılışlarda kayıtlı indeks anında kullanılır; disk sürekli veya periyodik olarak yeniden taranmaz.
 - Yeni, silinen veya taşınan dosyalar için `F5` kullanılır. İstenirse ayarlardan “Açılışta dosya indeksini yenile” etkinleştirilebilir.
-- Uygulama listesi program açılırken bir kez yenilenir; `F5` hem uygulamaları hem dosya indeksini yeniler.
+- Uygulama listesi program açılırken ve panel öne geldiğinde (en fazla 15 saniyede bir) yenilenir; yeni kurulan bir program için `F5` beklemene gerek kalmaz. `F5` hem uygulamaları hem dosya indeksini hemen yeniler.
 - Türkçe karakter ve büyük/küçük harf farkları önemsenmez: `is plani`, `İş Planı` sonucunu bulur.
-- Boş sorguda tüm diski listelemek yerine küçük panel halinde bekler.
+- Boş sorguda tüm diski listelemek yerine küçük panel halinde bekler; daha önce açılmış uygulama ve komutlar varsa son 5 tanesi listelenir.
 - En fazla 500 sonuç tutulur; panelde aynı anda ayarlanan sayıda satır görünür ve liste kaydırılabilir.
 
 Kısayollar:
@@ -149,7 +151,8 @@ Kısayollar:
 | --- | --- |
 | `Alt + F2` | Varsayılan olarak paneli aç / gizle; ayarlardan değiştirilebilir |
 | `Ctrl + ,` | Rofi ayarlarını aç |
-| `Tab` / `Ctrl + Tab` | Kipi değiştir (Tümü, Uygulamalar, Dosyalar, Komutlar, Web, Pencereler) |
+| `Tab` / `Ctrl + Tab` | Kipi ileri al (Tümü, Uygulamalar, Dosyalar, Komutlar, Web, Pencereler) |
+| `Shift + Tab` / `Ctrl + Shift + Tab` | Kipi geri al |
 | `Esc` | Paneli gizle ve sorguyu temizle |
 | `Enter` | Seçili öğeyi aç |
 | `Shift + Enter` | Öğeyi Dosya Gezgini'nde göster |
@@ -165,6 +168,7 @@ Sağ tık menüsünde açma, klasörde gösterme, yol kopyalama ve ayarlar bulun
 - Dosya içerikleri okunmaz; yalnızca ad, yol, tür, boyut ve tarih üst verileri indekslenir.
 - İndeks `%LOCALAPPDATA%\DosyaBul\index.sqlite3` dosyasındadır.
 - Ayarlar `%LOCALAPPDATA%\DosyaBul\settings.json` dosyasındadır.
+- Son kullanılan uygulama ve komutlar `%LOCALAPPDATA%\DosyaBul\history.json` dosyasında, yalnızca yerelde tutulur.
 - Telemetri, hesap veya internet servisi yoktur. Eşlenmiş ağ ve bulut sürücülerinin kendi bağlantıları ayrı konudur.
 - `!` web kipi yalnızca seçilen arama motorunu veya yazdığın HTTP(S) adresini varsayılan tarayıcıya gönderir.
 - Korumalı alanlar, Geri Dönüşüm Kutusu ve `System Volume Information` atlanır.
@@ -188,7 +192,7 @@ python -m pip install "pyinstaller>=6,<7"
 
 # Paketlenmiş EXE ve kısayol davranışı:
 $env:PYTHONPATH = (Get-Location)
-python tools\smoke_windows.py dist\DosyaBul.exe
+python tools\smoke_windows.py dist\DosyaBul\DosyaBul.exe
 ```
 
 `dosyabul\hotkey.py`, serbestçe kaydedilebilen Windows `RegisterHotKey` birleşimini; `applications.py`, Başlat menüsü/UWP uygulamalarını ve `/komut` kipini; `websearch.py`, `!` web kipini; `settings.py`, kalıcı ayarları yönetir. `windowing.py`, seçilen monitör konumunu ve panel boyutunu uygular. Grafik oturumu olmayan ortamlarda arayüz testleri atlanır.

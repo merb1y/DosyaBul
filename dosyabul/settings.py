@@ -1,7 +1,7 @@
 import json
 import os
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from .applications import TERMINAL_CHOICES
@@ -55,9 +55,10 @@ class AppSettings:
     row_scale: int = 140
     theme: str = "KooL Mocha"
     accent_color: str = ""
-    default_mode: str = "Tümü"
+    default_mode: str = "Uygulamalar"
     confirm_executables: bool = True
     minimize_to_tray: bool = True
+    settings_version: int = 2
 
     @property
     def hotkey_spec(self) -> HotkeySpec:
@@ -91,9 +92,10 @@ class AppSettings:
             row_scale=max(80, min(200, int(self.row_scale))),
             theme=self.theme if self.theme in THEME_CHOICES else "KooL Mocha",
             accent_color=clean_color(self.accent_color),
-            default_mode=self.default_mode if self.default_mode in MODE_CHOICES else "Tümü",
+            default_mode=self.default_mode if self.default_mode in MODE_CHOICES else "Uygulamalar",
             confirm_executables=bool(self.confirm_executables),
             minimize_to_tray=bool(self.minimize_to_tray),
+            settings_version=2,
         )
 
 
@@ -117,7 +119,11 @@ class SettingsStore:
                 raw["hotkey_modifiers"] = migrated.modifiers
                 raw["hotkey_key"] = migrated.key
             allowed = AppSettings.__dataclass_fields__.keys()
-            return AppSettings(**{key: raw[key] for key in allowed if key in raw}).normalized()
+            settings = AppSettings(**{key: raw[key] for key in allowed if key in raw}).normalized()
+            if "settings_version" not in raw and settings.default_mode == "Tümü":
+                # 1.9: ana sayfa artık yalnızca uygulama arıyor; dosya araması ayrı kipte.
+                settings = replace(settings, default_mode="Uygulamalar")
+            return settings
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return AppSettings(terminal_directory=str(Path.home()))
 

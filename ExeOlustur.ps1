@@ -26,10 +26,18 @@ try {
     & python tools/create_icons.py
     if ($LASTEXITCODE -ne 0) { throw 'Uygulama simgesi oluşturulamadı.' }
 
+    # Önceki derlemeden kalan tek-dosya DosyaBul.exe karışıklık yaratmasın;
+    # dist klasörünü baştan oluştur.
+    $dist = Join-Path $PSScriptRoot 'dist'
+    if (Test-Path $dist) { Remove-Item -Recurse -Force $dist -ErrorAction SilentlyContinue }
+
     Write-Host 'Windows uygulaması paketleniyor...'
-    & python -m PyInstaller --noconfirm --onefile --windowed --name DosyaBul --icon assets/icon.ico --add-data 'assets/icon.png;assets' --version-file assets/version_info.txt run.py
+    # Tek-dosya (--onefile) modu, kapanışta açık kalan dosya tutamaçları yüzünden
+    # "failed to remove temporary directory: _MEI..." uyarısı üretebiliyor.
+    # Klasör (--onedir) modunda geçici klasör hiç açılmadığı için bu hata oluşmaz.
+    & python -m PyInstaller --noconfirm --windowed --name DosyaBul --icon assets/icon.ico --add-data 'assets/icon.png;assets' --version-file assets/version_info.txt run.py
     if ($LASTEXITCODE -ne 0) { throw 'EXE oluşturulamadı.' }
-    Write-Host "Hazır: $PSScriptRoot\dist\DosyaBul.exe"
+    Write-Host "Hazır: $PSScriptRoot\dist\DosyaBul\DosyaBul.exe"
 } finally {
     Pop-Location
 }

@@ -22,6 +22,7 @@ class DefaultsTests(unittest.TestCase):
         self.assertEqual(s.visible_rows, 10)
         self.assertEqual(s.row_scale, 140)
         self.assertTrue(s.minimize_to_tray)
+        self.assertEqual(s.default_mode, "Uygulamalar")
 
 
 class NormalizeTests(unittest.TestCase):
@@ -44,6 +45,18 @@ class StoreTests(unittest.TestCase):
             loaded = store.load()
             self.assertEqual(loaded.accent_color, "#123456")
             self.assertFalse(loaded.minimize_to_tray)
+
+    def test_old_default_mode_migrates_to_apps(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            path.write_text('{"default_mode": "Tümü"}', encoding="utf-8")
+            self.assertEqual(SettingsStore(path).load().default_mode, "Uygulamalar")
+
+    def test_explicit_all_mode_is_kept_after_migration(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            path.write_text('{"default_mode": "Tümü", "settings_version": 2}', encoding="utf-8")
+            self.assertEqual(SettingsStore(path).load().default_mode, "Tümü")
 
 
 if __name__ == "__main__":
