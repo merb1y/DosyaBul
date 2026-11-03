@@ -721,6 +721,17 @@ class FinderApp:
                 if self.visible:
                     self._position_popup()
             return
+        if text == "-s" or text.startswith("-s "):
+            results = LauncherResults(
+                (ResultItem("settings", "DosyaBul Ayarları", "-s · Açmak için Enter", "settings", ""),),
+                1,
+            )
+            self.render_results(results)
+            self._last_results_generation = self._search_generation
+            if self._pending_open_generation == self._search_generation:
+                self._pending_open_generation = None
+                self.open_selected()
+            return
         if text.startswith("!") and self._mode in (MODE_ALL, MODE_WEB):
             web_text = text[1:].strip()
             if web_text:
@@ -1231,7 +1242,7 @@ class FinderApp:
         check("Çalıştırılabilir dosyada onay iste", confirm_var, 4, 0)
         check("Kapatınca sistem tepsisine küçült", tray_var, 4, 1)
 
-        tk.Label(content, text="Web: !arama / !site.com   ·   Komut: /komut   ·   Kaldır: -r program   ·   Kip: Ctrl+K veya Tab", bg=theme.background, fg=theme.muted, font=(FONT_FAMILY, 9), anchor="w").grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+        tk.Label(content, text="Web: !arama / !site.com   ·   Komut: /komut   ·   Kaldır: -r program   ·   Ayarlar: -s   ·   Kip: Ctrl+K veya Tab", bg=theme.background, fg=theme.muted, font=(FONT_FAMILY, 9), anchor="w").grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
         row += 1
         actions_box = tk.Frame(content, bg=theme.background)
         actions_box.grid(row=row, column=0, columnspan=3, sticky="e", pady=(3, 0))

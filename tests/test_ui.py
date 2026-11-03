@@ -157,6 +157,50 @@ class UiTests(unittest.TestCase):
             self.app._begin_search()
         searcher.assert_called_once()
 
+    def test_dash_s_shows_settings_result(self):
+        self.app.query_var.set('-s')
+        self.app._begin_search()
+        item = self.app._selected_item()
+        self.assertIsNotNone(item)
+        self.assertEqual(item.kind, 'settings')
+        self.assertEqual(item.name, 'DosyaBul Ayarları')
+        with patch.object(self.app, 'open_settings') as opener:
+            self.app.open_selected()
+        opener.assert_called_once()
+
+    def test_dash_r_lists_installed_programs_and_uninstalls(self):
+        from dosyabul.uninstall import InstalledProgram
+        with patch('dosyabul.app.search_installed_programs') as searcher:
+            searcher.return_value = (InstalledProgram('1', 'Stremio', '5.0', 'Stremio', r'"C:\x\unins000.exe"'),)
+            self.app.query_var.set('-r stremio')
+            self.app._begin_search()
+            self.app._search_future.result(timeout=5)
+            self.app._drain_events()
+            self.app._cancel_timer('_event_after')
+            searcher.assert_called_once_with('stremio')
+        item = self.app._selected_item()
+        self.assertIsNotNone(item)
+        self.assertEqual(item.kind, 'uninstall')
+        self.assertEqual(item.name, 'Stremio')
+        with patch('dosyabul.app.messagebox.askyesno', return_value=True), \
+             patch('dosyabul.app.launch_uninstall') as uninstaller:
+            self.app.open_selected()
+        uninstaller.assert_called_once_with(r'"C:\x\unins000.exe"')
+
+    def test_dash_r_declined_uninstall_does_nothing(self):
+        from dosyabul.uninstall import InstalledProgram
+        with patch('dosyabul.app.search_installed_programs') as searcher:
+            searcher.return_value = (InstalledProgram('1', 'Stremio', '5.0', 'Stremio', r'"C:\x\unins000.exe"'),)
+            self.app.query_var.set('-r stremio')
+            self.app._begin_search()
+            self.app._search_future.result(timeout=5)
+            self.app._drain_events()
+            self.app._cancel_timer('_event_after')
+        with patch('dosyabul.app.messagebox.askyesno', return_value=False), \
+             patch('dosyabul.app.launch_uninstall') as uninstaller:
+            self.app.open_selected()
+        uninstaller.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

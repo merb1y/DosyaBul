@@ -1,4 +1,4 @@
-# DosyaBul 1.10.0 — Windows için Rofi tarzı arama
+# DosyaBul 1.10.1 — Windows için Rofi tarzı arama
 
 Ekranın ortasında küçük bir panel olarak açılan; uygulama, komut, dosya, pencere ve web araması yapan yerel Windows başlatıcısı.
 
@@ -73,7 +73,7 @@ Doğrudan açma yalnızca geçerli HTTP(S) adresleri ve alan adları içindir; `
 
 ## Rofi ayarları
 
-**Ctrl + ,** ile ayarlar açılır. Arama alanına `rofi ayar` veya `DosyaBul Ayarları` yazmak da aynı pencereyi getirir.
+**Ctrl + ,** ile ayarlar açılır. Arama alanına `rofi ayar`, `DosyaBul Ayarları` veya `-s` yazmak da aynı pencereyi getirir.
 
 Değiştirilebilen seçenekler:
 
