@@ -1,4 +1,4 @@
-# DosyaBul 1.9.0 — Windows için Rofi tarzı arama
+# DosyaBul 1.10.0 — Windows için Rofi tarzı arama
 
 Ekranın ortasında küçük bir panel olarak açılan; uygulama, komut, dosya, pencere ve web araması yapan yerel Windows başlatıcısı.
 
@@ -62,6 +62,14 @@ WezTerm seçiliyken konsol sarmalayıcı `wezterm.exe` kullanılmaz; doğrudan `
 - `!https://example.com/path` → açık HTTP(S) adresini olduğu gibi açar.
 
 Doğrudan açma yalnızca geçerli HTTP(S) adresleri ve alan adları içindir; `javascript:` gibi şemalar çalıştırılmaz ve normal arama metni kabul edilir. Arama motoru ayarlardan Google, DuckDuckGo veya Bing olarak seçilebilir.
+
+## Program kaldırma
+
+- `-r stremio` → kurulu programlar kayıt defterinden aranır; eşleşmeler listelenir.
+- Bir sonucu seçip `Enter` → onay sorulduktan sonra programın kaldırma sihirbazı açılır.
+- Arama program adı ve üretici adı üzerinden yapılır; tam eşleşme en üstte gösterilir.
+- Kayıtlar HKLM (64/32 bit) ve HKCU kayıt defteri dallarındaki kaldırma girdilerinden okunur; yamalar ve sistem bileşenleri listelenmez.
+- Kaldırıcı, programın kendi sihirbazını (Inno Setup, NSIS, MSI vb.) kendi arayüzüyle açar; onay verilmeden hiçbir şey silinmez.
 
 ## Rofi ayarları
 

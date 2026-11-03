@@ -1,8 +1,8 @@
-; DosyaBul 1.9.0 kurulum scripti (Inno Setup 6)
+; DosyaBul 1.10.0 kurulum scripti (Inno Setup 6)
 ; Derleme: ISCC.exe installer\DosyaBul.iss
 
 #define MyAppName "DosyaBul"
-#define MyAppVersion "1.9.0"
+#define MyAppVersion "1.10.0"
 #define MyAppPublisher "DosyaBul"
 #define MyAppExeName "DosyaBul.exe"
 

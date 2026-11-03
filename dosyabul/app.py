@@ -22,6 +22,7 @@ from .models import FileResult, ScanProgress, ScanReport, SearchResults
 from .query import QueryError, fold_text, parse_plain_query
 from .settings import MODE_CHOICES, MONITOR_CHOICES, POSITION_CHOICES, ROW_CHOICES, THEME_CHOICES, AppSettings, SettingsStore
 from .startup import is_startup_enabled, set_startup
+from .uninstall import launch_uninstall, search_installed_programs
 from . import themes
 from .websearch import SEARCH_ENGINES, open_web, resolve_web_input
 from .windowing import activate_window, active_work_area, apply_popup_style, popup_geometry
@@ -683,6 +684,43 @@ class FinderApp:
                 if self.visible:
                     self._position_popup()
             return
+        if (text == "-r" or text.startswith("-r ")) and self._mode in (MODE_ALL, MODE_APPS, MODE_COMMANDS):
+            query = text[2:].strip()
+            if query:
+                generation = self._search_generation
+                cancel = threading.Event()
+                self._search_cancel = cancel
+                future = self.executor.submit(search_installed_programs, query)
+                self._search_future = future
+
+                def complete_uninstall(completed):
+                    try:
+                        programs = completed.result()
+                    except (CancelledError, SearchCancelled):
+                        return
+                    except Exception as error:
+                        self.events.put(("search", generation, None, error))
+                    else:
+                        items = tuple(
+                            ResultItem(
+                                f"uninstall:{program.key}",
+                                program.name,
+                                "Kaldır · " + (" ".join(filter(None, (program.publisher, program.version))) or "kurulu program"),
+                                "uninstall",
+                                program.uninstall_string,
+                            )
+                            for program in programs
+                        )
+                        self.events.put(("search", generation, LauncherResults(items, len(items)), None))
+
+                future.add_done_callback(complete_uninstall)
+            else:
+                self.render_results(LauncherResults((), 0))
+                self._result_rows = 1
+                self._show_empty("Kaldırılacak programı yaz · Örnek: -r stremio")
+                if self.visible:
+                    self._position_popup()
+            return
         if text.startswith("!") and self._mode in (MODE_ALL, MODE_WEB):
             web_text = text[1:].strip()
             if web_text:
@@ -837,6 +875,8 @@ class FinderApp:
             return self._folder_icon
         if item.kind == "command":
             return self._terminal_icon
+        if item.kind == "uninstall":
+            return self._app_icon
         if item.kind == "settings":
             return self._settings_icon
         if item.kind == "web":
@@ -900,6 +940,25 @@ class FinderApp:
                 messagebox.showerror("Komut çalıştırılamadı", str(error), parent=self.root)
             else:
                 self._remember_launch(item)
+            return "break"
+        if item.kind == "uninstall":
+            self._suspend_hide = True
+            try:
+                if not messagebox.askyesno(
+                    "Programı kaldır",
+                    f"{item.name}\n\nKaldırma sihirbazı açılacak. Devam edilsin mi?",
+                    parent=self.root,
+                    default="no",
+                ):
+                    return "break"
+            finally:
+                self._suspend_hide = False
+            try:
+                self.hide_popup()
+                launch_uninstall(item.target)
+            except (OSError, ValueError) as error:
+                self.show_popup()
+                messagebox.showerror("Program kaldırılamadı", str(error), parent=self.root)
             return "break"
         if item.kind == "web":
             try:
@@ -1172,7 +1231,7 @@ class FinderApp:
         check("Çalıştırılabilir dosyada onay iste", confirm_var, 4, 0)
         check("Kapatınca sistem tepsisine küçült", tray_var, 4, 1)
 
-        tk.Label(content, text="Web: !arama / !site.com   ·   Komut: /komut   ·   Kip: Ctrl+K veya Tab", bg=theme.background, fg=theme.muted, font=(FONT_FAMILY, 9), anchor="w").grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+        tk.Label(content, text="Web: !arama / !site.com   ·   Komut: /komut   ·   Kaldır: -r program   ·   Kip: Ctrl+K veya Tab", bg=theme.background, fg=theme.muted, font=(FONT_FAMILY, 9), anchor="w").grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
         row += 1
         actions_box = tk.Frame(content, bg=theme.background)
         actions_box.grid(row=row, column=0, columnspan=3, sticky="e", pady=(3, 0))
