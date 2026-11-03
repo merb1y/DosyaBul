@@ -1,4 +1,4 @@
-# DosyaBul 1.10.1 — Windows için Rofi tarzı arama
+# DosyaBul 1.11.1 — Windows için Rofi tarzı arama
 
 Ekranın ortasında küçük bir panel olarak açılan; uygulama, komut, dosya, pencere ve web araması yapan yerel Windows başlatıcısı.
 
@@ -70,6 +70,20 @@ Doğrudan açma yalnızca geçerli HTTP(S) adresleri ve alan adları içindir; `
 - Arama program adı ve üretici adı üzerinden yapılır; tam eşleşme en üstte gösterilir.
 - Kayıtlar HKLM (64/32 bit) ve HKCU kayıt defteri dallarındaki kaldırma girdilerinden okunur; yamalar ve sistem bileşenleri listelenmez.
 - Kaldırıcı, programın kendi sihirbazını (Inno Setup, NSIS, MSI vb.) kendi arayüzüyle açar; onay verilmeden hiçbir şey silinmez.
+
+## Komutlar
+
+Panelde yazılan komutlar (tümü her kipte çalışır):
+
+| Komut | İşlev |
+| --- | --- |
+| `-h` | Tüm komutları ve kısayolları listeler; bir komutun üstünde `Enter` sorguyu o komutla doldurur |
+| `-s` | DosyaBul Ayarları'nı açar |
+| `-r <program>` | Kurulu programı arar ve kaldırma sihirbazını açar |
+| `-y` | Uygulama listesini ve dosya indeksini yeniler |
+| `-q` | DosyaBul'u tamamen kapatır (onay sorulur) |
+| `/komut` | Komutu seçili terminalde çalıştırır |
+| `!arama` / `!site.com` | Web'de arar ya da adresi açar |
 
 ## Rofi ayarları
 

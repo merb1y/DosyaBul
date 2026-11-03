@@ -556,10 +556,45 @@ class FinderApp:
             return (ResultItem("settings", "DosyaBul Ayarları", "Ctrl + ,", "settings", ""),)
         return ()
 
+    def _help_items(self) -> tuple[ResultItem, ...]:
+        """-h için komut ve kısayol listesini üretir; komut satırları Enter ile denenir."""
+        command_rows = (
+            ("-s", "", "DosyaBul Ayarları", "Ayarlar penceresini açar"),
+            ("-r ", "program", "Program kaldır", "Kurulu programı arar, kaldırma sihirbazını açar"),
+            ("/", "komut", "Terminal komutu", "Komutu seçili terminalde çalıştırır"),
+            ("!", "arama", "Web araması", "Tarayıcıda arar ya da adresi açar"),
+            ("-y", "", "Yenile", "Uygulama listesini ve dosya indeksini yeniler"),
+            ("-h", "", "Yardım", "Bu listeyi gösterir"),
+            ("-q", "", "Çıkış", "DosyaBul'u tamamen kapatır"),
+        )
+        items = [
+            ResultItem(
+                f"help:{index}",
+                f"{command}{argument}  —  {description}",
+                "Komut · Enter ile dene",
+                "help",
+                command + argument,
+            )
+            for index, (command, argument, _, description) in enumerate(command_rows)
+        ]
+        shortcut_rows = (
+            ("Tab / Ctrl+Tab", "Kip değiştir"),
+            ("Ctrl + ,", "Ayarları aç"),
+            ("Alt + F2", "Paneli göster / gizle"),
+            ("Esc", "Paneli gizle"),
+            ("Ctrl + Q", "Uygulamadan çık"),
+        )
+        items.extend(
+            ResultItem(f"help:key{index}", f"{keys}  —  {description}", "Kısayol", "help", "")
+            for index, (keys, description) in enumerate(shortcut_rows)
+        )
+        return tuple(items)
+
     def _recent_records(self) -> tuple[LaunchRecord, ...]:
         """Boş sorguda gösterilecek son kullanılan uygulama ve komutlar."""
         if self._mode == MODE_APPS:
-            categories = ("app",)
+            # Ana sayfa hem son uygulamaları hem de son /komutları gösterir.
+            categories = ("app", "command")
         elif self._mode == MODE_COMMANDS:
             categories = ("command",)
         elif self._mode == MODE_ALL:
@@ -579,10 +614,17 @@ class FinderApp:
         return tuple(records)
 
     def _recent_items(self) -> tuple[ResultItem, ...]:
-        return tuple(
-            ResultItem(f"recent:{index}", record.name, record.detail or "Son kullanılan", record.kind, record.target)
-            for index, record in enumerate(self._recent_records())
-        )
+        items = []
+        for index, record in enumerate(self._recent_records()):
+            if record.kind == "command":
+                # Komutlar, yazıldığı biçimdeki / önekiyle gösterilir.
+                name = record.name if record.name.startswith("/") else "/" + record.name
+                detail = record.detail or "Terminalde çalıştır · Son kullanılan"
+            else:
+                name = record.name
+                detail = record.detail or "Son kullanılan"
+            items.append(ResultItem(f"recent:{index}", name, detail, record.kind, record.target))
+        return tuple(items)
 
     def _placeholder_text(self) -> str:
         return "Son kullanılanlar · ara…" if self._recent_items() else PLACEHOLDER
@@ -724,6 +766,33 @@ class FinderApp:
         if text == "-s" or text.startswith("-s "):
             results = LauncherResults(
                 (ResultItem("settings", "DosyaBul Ayarları", "-s · Açmak için Enter", "settings", ""),),
+                1,
+            )
+            self.render_results(results)
+            self._last_results_generation = self._search_generation
+            if self._pending_open_generation == self._search_generation:
+                self._pending_open_generation = None
+                self.open_selected()
+            return
+        if text == "-h" or text.startswith("-h "):
+            items = self._help_items()
+            self.render_results(LauncherResults(items, len(items)))
+            self._last_results_generation = self._search_generation
+            return
+        if text == "-y" or text.startswith("-y "):
+            results = LauncherResults(
+                (ResultItem("refresh", "Uygulama listesi ve dosya indeksini yenile", "-y · Yenilemek için Enter", "refresh", ""),),
+                1,
+            )
+            self.render_results(results)
+            self._last_results_generation = self._search_generation
+            if self._pending_open_generation == self._search_generation:
+                self._pending_open_generation = None
+                self.open_selected()
+            return
+        if text == "-q" or text.startswith("-q "):
+            results = LauncherResults(
+                (ResultItem("quit", "DosyaBul'dan çık", "-q · Çıkmak için Enter", "quit", ""),),
                 1,
             )
             self.render_results(results)
@@ -888,6 +957,10 @@ class FinderApp:
             return self._terminal_icon
         if item.kind == "uninstall":
             return self._app_icon
+        if item.kind == "help":
+            return self._settings_icon
+        if item.kind in ("refresh", "quit"):
+            return self._app_icon
         if item.kind == "settings":
             return self._settings_icon
         if item.kind == "web":
@@ -941,6 +1014,25 @@ class FinderApp:
             return "break"
         if item.kind == "settings":
             self.open_settings()
+            return "break"
+        if item.kind == "help":
+            if item.target:
+                self.query_var.set(item.target)
+                self._begin_search()
+                self.focus_search()
+            return "break"
+        if item.kind == "refresh":
+            self.hide_popup()
+            self.refresh_all()
+            return "break"
+        if item.kind == "quit":
+            self._suspend_hide = True
+            try:
+                if not messagebox.askyesno("DosyaBul", "DosyaBul tamamen kapatılsın mı?", parent=self.root, default="no"):
+                    return "break"
+            finally:
+                self._suspend_hide = False
+            self.quit_app()
             return "break"
         if item.kind == "command":
             try:
@@ -1242,7 +1334,7 @@ class FinderApp:
         check("Çalıştırılabilir dosyada onay iste", confirm_var, 4, 0)
         check("Kapatınca sistem tepsisine küçült", tray_var, 4, 1)
 
-        tk.Label(content, text="Web: !arama / !site.com   ·   Komut: /komut   ·   Kaldır: -r program   ·   Ayarlar: -s   ·   Kip: Ctrl+K veya Tab", bg=theme.background, fg=theme.muted, font=(FONT_FAMILY, 9), anchor="w").grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+        tk.Label(content, text="Web: !arama   ·   Komut: /komut   ·   Kaldır: -r program   ·   Ayarlar: -s   ·   Yardım: -h   ·   Kip: Ctrl+K veya Tab", bg=theme.background, fg=theme.muted, font=(FONT_FAMILY, 9), anchor="w").grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
         row += 1
         actions_box = tk.Frame(content, bg=theme.background)
         actions_box.grid(row=row, column=0, columnspan=3, sticky="e", pady=(3, 0))

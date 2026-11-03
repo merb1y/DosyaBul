@@ -108,15 +108,22 @@ class UiTests(unittest.TestCase):
         self.app.set_mode('Tümü')
         self.app._begin_search()
         names = [self.app.tree.item(item, 'text') for item in self.app.tree.get_children()]
-        self.assertEqual(names, ['oc', 'Ferah'])
+        self.assertEqual(names, ['/oc', 'Ferah'])
         self.assertIn('Son kullanılanlar', self.app.placeholder['text'])
 
-    def test_home_mode_lists_only_recent_apps(self):
+    def test_home_mode_lists_recent_apps_and_commands(self):
         self.app.history.record(LaunchRecord('app:shortcut', 'Ferah', r'C:\Program Files\Ferah\Ferah.lnk', 'Uygulama'))
         self.app.history.record(LaunchRecord('command', 'oc', 'oc', 'Terminalde çalıştır'))
         self.app._begin_search()
         names = [self.app.tree.item(item, 'text') for item in self.app.tree.get_children()]
-        self.assertEqual(names, ['Ferah'])
+        self.assertEqual(names, ['/oc', 'Ferah'])
+        # Komut satırı seçilip Enter'a basılınca terminalde çalışır.
+        command_item = self.app._selected_item()
+        self.assertEqual(command_item.kind, 'command')
+        self.assertEqual(command_item.target, 'oc')
+        with patch('dosyabul.app.launch_terminal_command') as launcher:
+            self.app.open_selected()
+        launcher.assert_called_once()
 
     def test_empty_query_without_history_keeps_empty_panel(self):
         self.app._begin_search()
@@ -200,6 +207,56 @@ class UiTests(unittest.TestCase):
              patch('dosyabul.app.launch_uninstall') as uninstaller:
             self.app.open_selected()
         uninstaller.assert_not_called()
+
+    def test_dash_h_lists_help_rows(self):
+        self.app.query_var.set('-h')
+        self.app._begin_search()
+        items = list(self.app.items.values())
+        kinds = {item.kind for item in items}
+        self.assertEqual(kinds, {'help'})
+        names = ' '.join(item.name for item in items)
+        for expected in ('-s', '-r program', '/komut', '!arama', '-y', '-q', 'Tab / Ctrl+Tab', 'Alt + F2'):
+            self.assertIn(expected, names)
+        # Komut satırı Enter ile denenir: sorgu doldurulur, kısayol satırı pas geçer.
+        rendered = list(self.app.items.values())
+        self.assertTrue(rendered)
+        row = next(item for item in rendered if item.target == '-s')
+        self.app.tree.selection_set(row.key)
+        self.app.query_var.set('')
+        self.app.open_selected()
+        self.assertEqual(self.app.query_var.get(), '-s')
+        self.app.query_var.set('-h')
+        self.app._begin_search()
+        rendered = list(self.app.items.values())
+        shortcut = next((item for item in rendered if item.target == ''), None)
+        if shortcut is not None:
+            self.app.tree.selection_set(shortcut.key)
+            self.app.query_var.set('')
+            self.app.open_selected()
+            self.assertEqual(self.app.query_var.get(), '')
+
+    def test_dash_y_refreshes(self):
+        self.app.query_var.set('-y')
+        self.app._begin_search()
+        item = self.app._selected_item()
+        self.assertEqual(item.kind, 'refresh')
+        with patch.object(self.app, 'refresh_all') as refresher:
+            self.app.open_selected()
+        refresher.assert_called_once()
+
+    def test_dash_q_confirmed_quits(self):
+        self.app.query_var.set('-q')
+        self.app._begin_search()
+        item = self.app._selected_item()
+        self.assertEqual(item.kind, 'quit')
+        with patch('dosyabul.app.messagebox.askyesno', return_value=True), \
+             patch.object(self.app, 'quit_app') as quitter:
+            self.app.open_selected()
+        quitter.assert_called_once()
+        with patch('dosyabul.app.messagebox.askyesno', return_value=False), \
+             patch.object(self.app, 'quit_app') as quitter:
+            self.app.open_selected()
+        quitter.assert_not_called()
 
 
 if __name__ == '__main__':
