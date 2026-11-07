@@ -7,8 +7,15 @@ from ctypes import wintypes
 
 WM_APP = 0x8000
 WM_TRAY = WM_APP + 1
+WM_NULL = 0x0000
 WM_LBUTTONUP = 0x0202
 WM_RBUTTONUP = 0x0205
+WM_CONTEXTMENU = 0x007B
+MF_STRING = 0x00000000
+MF_SEPARATOR = 0x00000800
+TPM_RETURNCMD = 0x0100
+TPM_NONOTIFY = 0x0080
+TPM_RIGHTBUTTON = 0x0002
 NIM_ADD = 0x00000000
 NIM_MODIFY = 0x00000001
 NIM_DELETE = 0x00000002
@@ -52,6 +59,11 @@ def _setup_api():
     _shell32.Shell_NotifyIconW.argtypes = (wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATA))
     _shell32.Shell_NotifyIconW.restype = wintypes.BOOL
     _shell32.ExtractIconExW.restype = wintypes.UINT
+    _user32.LoadImageW.argtypes = (
+        wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
+        ctypes.c_int, ctypes.c_int, wintypes.UINT,
+    )
+    _user32.LoadImageW.restype = wintypes.HICON
     _user32.RegisterClassW.restype = wintypes.ATOM
     _user32.CreateWindowExW.restype = wintypes.HWND
     _user32.CreateWindowExW.argtypes = (
@@ -64,6 +76,17 @@ def _setup_api():
     _user32.GetMessageW.argtypes = (ctypes.POINTER(MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT)
     _user32.GetMessageW.restype = ctypes.c_int
     _user32.PostMessageW.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+    _user32.CreatePopupMenu.restype = wintypes.HMENU
+    _user32.AppendMenuW.argtypes = (wintypes.HMENU, wintypes.UINT, ctypes.c_size_t, wintypes.LPCWSTR)
+    _user32.AppendMenuW.restype = wintypes.BOOL
+    _user32.TrackPopupMenu.argtypes = (
+        wintypes.HMENU, wintypes.UINT, ctypes.c_int, ctypes.c_int,
+        ctypes.c_int, wintypes.HWND, wintypes.LPVOID,
+    )
+    _user32.TrackPopupMenu.restype = wintypes.BOOL
+    _user32.DestroyMenu.argtypes = (wintypes.HMENU,)
+    _user32.GetCursorPos.argtypes = (ctypes.POINTER(wintypes.POINT),)
+    _user32.SetForegroundWindow.argtypes = (wintypes.HWND,)
     _kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 
 
@@ -126,14 +149,16 @@ def load_tray_icon(path=None):
 class TrayIcon:
     """Sistem tepsisinde ikon gosterir; tiklamalari callback'e iletir."""
 
-    def __init__(self, tooltip="DosyaBul", on_select=None, on_context=None, icon_handle=None):
+    def __init__(self, tooltip="DosyaBul", on_select=None, on_context=None, icon_handle=None, on_action=None):
         self.tooltip = tooltip
         self._on_select = on_select
         self._on_context = on_context
-        self._hicon = icon_handle
+        self._on_action = on_action
+        self._hicon = icon_handle if icon_handle is not None else load_tray_icon()
         self._hwnd = None
         self._installed = False
         self._thread = None
+        self._ready = threading.Event()
         self._stop = threading.Event()
         self._wndproc_ref = None
 
@@ -144,9 +169,10 @@ class TrayIcon:
     def start(self):
         if os.name != "nt" or _shell32 is None:
             return False
+        self._ready.clear()
         self._thread = threading.Thread(target=self._run, daemon=True, name="DosyaBul-Tepsi")
         self._thread.start()
-        self._thread.join(timeout=2.0)
+        self._ready.wait(timeout=2.0)
         return self._installed
 
     def _register_class(self, instance):
@@ -164,12 +190,43 @@ class TrayIcon:
             event = int(lparam) & 0xFFFF
             if event == WM_LBUTTONUP:
                 self._dispatch(self._on_select)
-            elif event == WM_RBUTTONUP:
-                self._dispatch(self._on_context)
+            elif event in (WM_RBUTTONUP, WM_CONTEXTMENU):
+                if self._on_action is not None:
+                    self._show_native_menu(hwnd)
+                else:
+                    self._dispatch(self._on_context)
             return 0
         if message == 0x0010:
             return 0
         return _user32.DefWindowProcW(hwnd, message, wparam, lparam)
+
+    def _show_native_menu(self, hwnd):
+        hmenu = _user32.CreatePopupMenu()
+        if not hmenu:
+            return
+        try:
+            _user32.AppendMenuW(hmenu, MF_STRING, 1, "Göster / Gizle")
+            _user32.AppendMenuW(hmenu, MF_STRING, 2, "Ayarlar")
+            _user32.AppendMenuW(hmenu, MF_STRING, 3, "Yenile")
+            _user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
+            _user32.AppendMenuW(hmenu, MF_STRING, 4, "Çıkış")
+            pt = wintypes.POINT()
+            _user32.GetCursorPos(ctypes.byref(pt))
+            _user32.SetForegroundWindow(hwnd)
+            cmd = _user32.TrackPopupMenu(
+                hmenu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+                pt.x, pt.y, 0, hwnd, None,
+            )
+            _user32.PostMessageW(hwnd, WM_NULL, 0, 0)
+            actions = {1: "tray_toggle", 2: "tray_settings", 3: "tray_refresh", 4: "tray_quit"}
+            action = actions.get(int(cmd))
+            if action and self._on_action:
+                try:
+                    self._on_action(action)
+                except Exception:
+                    pass
+        finally:
+            _user32.DestroyMenu(hmenu)
 
     def _dispatch(self, callback):
         if callback is None:
@@ -186,9 +243,11 @@ class TrayIcon:
             0, class_name, "DosyaBulTray", 0, 0, 0, 0, 0, None, None, instance, None,
         )
         if not hwnd:
+            self._ready.set()
             return
         self._hwnd = hwnd
         self._add_icon(hwnd)
+        self._ready.set()
         message = MSG()
         while not self._stop.is_set():
             result = _user32.GetMessageW(ctypes.byref(message), None, 0, 0)
@@ -204,7 +263,7 @@ class TrayIcon:
         data.cbSize = ctypes.sizeof(NOTIFYICONDATA)
         data.hWnd = hwnd
         data.uID = 1
-        data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
+        data.uFlags = NIF_MESSAGE | NIF_TIP | (NIF_ICON if self._hicon else 0)
         data.uCallbackMessage = WM_TRAY
         data.hIcon = self._hicon or 0
         data.szTip = self.tooltip[:127]

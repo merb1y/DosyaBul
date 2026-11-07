@@ -1,4 +1,4 @@
-# DosyaBul 1.11.2 — Windows için Rofi tarzı arama
+# DosyaBul 1.11.3 — Windows için Rofi tarzı arama
 
 Ekranın ortasında küçük bir panel olarak açılan; uygulama, komut, dosya, pencere ve web araması yapan yerel Windows başlatıcısı.
 
@@ -23,6 +23,57 @@ Rofi'nin "modi" yapısına benzer bir kip sistemi vardır. Kipi **Tab** veya **C
 | Komutlar | `/komut` yazarak terminale gönder |
 | Web | Doğrudan web araması veya adres açma |
 | Pencereler | Açık pencereleri arar ve öne getirir |
+| Pano | Son 50 kopyalananı arar; `Enter` yapıştırır, `Ctrl+D` siler (yalnızca bellekte tutulur) |
+| Emoji | Türkçe/İngilizce anahtar sözcükle emoji ve sembol arar; `Enter` yapıştırır |
+| Sistem | Kilitle, uyku, hazırda beklet, oturumu kapat, yeniden başlat, kapat, Wi-Fi/Bluetooth/ses/ekran ayarları, ekran görüntüsü, görev yöneticisi, geri dönüşüm kutusunu boşalt (yıkıcı olanlar onay ister) |
+| Betikler | `%LOCALAPPDATA%\DosyaBul\scripts` içindeki `.py/.ps1/.cmd/.bat` betikleri |
+
+## Hızlı araçlar
+
+Önek yazarak **Tümü** ve **Uygulamalar** kiplerinde çalışır:
+
+| Yazım | İşlev |
+| --- | --- |
+| `= 2*(3+4)` ya da doğrudan `2+2` | Hesap makinesi (`sqrt`, `sin`, `ln`, `pi`, `^`…); `Enter` sonucu kopyalar |
+| `10 km mi`, `100 c f`, `1 gb mb` | Birim çevirici (uzunluk, kütle, hacim, veri, süre, hız, alan, sıcaklık) |
+| `n: süt al` | `notes.txt` dosyasına zaman damgalı not ekler; `n:` tek başına dosyayı açar |
+| `timer 10m çay`, `timer 1sa30dk` | Zamanlayıcı; süre dolunca sesli uyarı penceresi açar (birimsiz sayı dakikadır) |
+| `:ateş` | Emoji arar |
+| `!yt kedi`, `!gh dosyabul`, `!tr merhaba` | Özel web kısayolları; `settings.json` içindeki `web_shortcuts` ile eklenir (`{}` içeren http/https adresi) |
+| `-p`, `-c`, `-t` | Sistem komutları, pano geçmişi, tema dosyası |
+
+Para birimi çevirisi yoktur (internet servisi kullanılmadığı için).
+
+## Betik modu
+
+`scripts` klasörüne konan betik argümansız çalışınca stdout satırları liste olur. Seçilen satır betiğe argüman olarak verilip yeniden çalıştırılır; çıktı boşsa panel kapanır. İlk açılışta `ornek.py` örneği oluşturulur. Betikler 10 saniyede bitmezse sonlandırılır; yalnızca güvendiğin betikleri koy.
+
+## Sık kullanılanlar (frecency)
+
+Açtığın uygulama ve dosyalar `usage.json` içinde sayılır; sık ve yakın zamanda açılanlar aramada öne çıkar (14 günde yarılanan ağırlık).
+
+## Ek eylemler ve önizleme
+
+- `Alt+Enter`: dosya/klasörde terminali o klasörde açar, pencerede pencereyi kapatır, uygulamada yönetici olarak çalıştırır.
+- `Ctrl+I`: seçili dosyanın ilk 4 KB'ını (metinse) ya da boyut/tarih bilgisini, klasörün içeriğini gösterir.
+
+## Yapılandırma dosyası (theme.json)
+
+`-t` yazınca `%LOCALAPPDATA%\DosyaBul\theme.json` örnek içerikle oluşturulur ve açılır (Rofi `config.rasi` benzeri). Tüm anahtarlar isteğe bağlıdır; geçersiz değerler yok sayılır.
+
+| Anahtar | Etki |
+| --- | --- |
+| `extends` | Temel tema (KooL Mocha, Nord, Gruvbox, Tokyo Night, Solarized) |
+| `background`, `surface`, `text`, `muted`, `border`, `accent`, `accent_text`, `category` | `#RRGGBB` renkler |
+| `font` | Yazı tipi ailesi |
+| `border_width` | Çerçeve kalınlığı (0–8) |
+| `header_height` | Arama alanı yüksekliği (30–100) |
+| `placeholder` | Boş arama kutusu metni |
+| `mode_chip` | Sağ üstteki kip etiketini göster/gizle |
+| `modes` | Kullanılacak kipler ve Tab sırası |
+| `entries` | Kendi girdilerin: `name` + `run` / `terminal` / `url` / `path` (biri) + isteğe bağlı `keywords`; Tümü ve Uygulamalar kiplerinde aranır |
+
+Renkler ayarlarda **Kaydet**'e basınca uygulanır; font, çerçeve ve başlık ölçüleri uygulama yeniden başlayınca geçerli olur. Ayarlar penceresi içeriğe göre genişler, ekrana sığmazsa kaydırılır.
 
 ## Sistem tepsisi
 

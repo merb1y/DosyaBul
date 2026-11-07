@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable
 
-from .query import fold_text
+from .query import fold_text, fuzzy_score
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 TERMINAL_CHOICES = ("WezTerm", "Windows Terminal", "PowerShell")
@@ -194,12 +194,17 @@ class ApplicationIndex:
         full = " ".join(terms)
         for app in applications:
             key = app.search_key
+            name = fold_text(app.name)
             if all(term in key for term in terms):
-                name = fold_text(app.name)
                 exact = 0 if name == full else 1
                 match = 0 if name == full else 1 if name.startswith(full) else 2 if full in name else 3
                 rank = (exact, app.priority, match, len(name), name)
                 matches.append((rank, app))
+            else:
+                fscore = fuzzy_score(full, app.name)
+                if fscore is not None:
+                    rank = (2, app.priority, 1000 - fscore, len(name), name)
+                    matches.append((rank, app))
         matches.sort(key=lambda pair: pair[0])
         return tuple(app for _, app in matches[:limit])
 

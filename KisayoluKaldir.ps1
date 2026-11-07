@@ -15,5 +15,12 @@ Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' 
 Remove-Item -LiteralPath $startupLink -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $startMenuLink -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $installDir -Recurse -Force -ErrorAction SilentlyContinue
+@(
+    'HKCU:\Software\Classes\exefile\shell\DosyaBulPin',
+    'HKCU:\Software\Classes\lnkfile\shell\DosyaBulPin',
+    'HKCU:\Software\Classes\InternetShortcut\shell\DosyaBulPin',
+    'HKCU:\Software\Classes\SystemFileAssociations\.exe\shell\DosyaBulPin',
+    'HKCU:\Software\Classes\SystemFileAssociations\.lnk\shell\DosyaBulPin'
+) | ForEach-Object { Remove-Item -LiteralPath $_ -Recurse -Force -ErrorAction SilentlyContinue }
 Write-Host 'DosyaBul otomatik başlangıçtan ve Başlat menüsünden kaldırıldı.'
 Write-Host 'Arama indeksi korunuyor: %LOCALAPPDATA%\DosyaBul'

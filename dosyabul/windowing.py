@@ -119,9 +119,9 @@ def apply_popup_style(root):
     set_style(hwnd, GWL_EXSTYLE, (style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW)
     try:
         dwm = ctypes.WinDLL("dwmapi")
-        preference = ctypes.c_int(1)  # DWMWCP_DONOTROUND: koseli Rofi paneli
+        preference = ctypes.c_int(2)  # DWMWCP_ROUND: yuvarlatilmis Rofi paneli
         dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference))
-        border = ctypes.c_uint(0x00FBCD96)  # COLORREF, yumusak mor vurgu
+        border = ctypes.c_uint(0x005A4E4A)  # COLORREF, koyu gri cerceve
         dwm.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(border), ctypes.sizeof(border))
     except (AttributeError, OSError):
         pass

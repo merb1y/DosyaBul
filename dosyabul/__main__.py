@@ -10,7 +10,9 @@ from . import __version__
 from .actions import configure_windows
 from .app import FinderApp
 from .database import IndexDatabase
+from .dmenu import run_dmenu
 from .instance import InstanceGuard
+from .pins import PinStore
 
 
 class TurkishHelpFormatter(argparse.HelpFormatter):
@@ -30,15 +32,45 @@ def resource_path(relative: str) -> Path:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="DosyaBul", description="Windows için Rofi tarzı uygulama, komut ve dosya arama.", usage="%(prog)s [--background] [--data-dir KLASÖR] [--version]", add_help=False, formatter_class=TurkishHelpFormatter)
+    parser = argparse.ArgumentParser(
+        prog="DosyaBul",
+        description="Windows için Rofi tarzı uygulama, komut ve dosya arama.",
+        usage="%(prog)s [--background] [--dmenu] [-p İSTEM] [--pin YOL] [--unpin YOL] [--data-dir KLASÖR] [--version]",
+        add_help=False,
+        formatter_class=TurkishHelpFormatter,
+    )
     parser._optionals.title = "Seçenekler"
     parser.add_argument("-h", "--help", action="help", help="Bu yardım metnini göster.")
     parser.add_argument("--data-dir", type=Path, metavar="KLASÖR", help="İndeksi ve günlükleri bu klasörde sakla.")
     parser.add_argument("--version", action="version", version=f"DosyaBul {__version__}", help="Sürüm bilgisini göster.")
     parser.add_argument("--background", action="store_true", help="Arka planda başlat; ayarlanan kısayolla göster.")
+    parser.add_argument("-d", "--dmenu", action="store_true", help="Rofi dmenu kipi: stdin'den satırları oku, seçileni stdout'a yaz.")
+    parser.add_argument("-p", "--prompt", default="Seç:", metavar="İSTEM", help="dmenu kipinde başlık metni.")
+    parser.add_argument("-i", "--ignore-case", action="store_true", help="dmenu kipinde büyük/küçük harf duyarsız eşleş (varsayılan).")
+    parser.add_argument("--pin", metavar="YOL", help="Belirtilen uygulama veya kısayolu DosyaBul başlangıcına sabitle.")
+    parser.add_argument("--unpin", metavar="YOL", help="Belirtilen uygulamanın DosyaBul sabitlemesini kaldır.")
     parser.add_argument("--test-drive", type=Path, help=argparse.SUPPRESS)
     arguments = parser.parse_args(argv)
     data_directory = arguments.data_dir or default_data_directory()
+
+    if arguments.pin:
+        data_directory.mkdir(parents=True, exist_ok=True)
+        PinStore(data_directory / "pinned.json").pin(arguments.pin)
+        return 0
+
+    if arguments.unpin:
+        data_directory.mkdir(parents=True, exist_ok=True)
+        PinStore(data_directory / "pinned.json").unpin(arguments.unpin)
+        return 0
+
+    if arguments.dmenu:
+        configure_windows()
+        lines = sys.stdin.read().splitlines() if not sys.stdin.isatty() else []
+        code, selected = run_dmenu(lines, prompt=arguments.prompt, data_dir=data_directory)
+        if code == 0 and selected is not None:
+            print(selected, flush=True)
+        return code
+
     window = None
     instance = None
     application = None

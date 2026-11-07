@@ -8,11 +8,11 @@ VSVersionInfo(
         StringFileInfo([
             StringTable('041f04b0', [
                 StringStruct('FileDescription', 'DosyaBul - Rofi tarzı arama'),
-                StringStruct('FileVersion', '1.11.2.0'),
+                StringStruct('FileVersion', '1.11.3.0'),
                 StringStruct('InternalName', 'DosyaBul'),
                 StringStruct('OriginalFilename', 'DosyaBul.exe'),
                 StringStruct('ProductName', 'DosyaBul'),
-                StringStruct('ProductVersion', '1.11.2.0')
+                StringStruct('ProductVersion', '1.11.3.0')
             ])
         ]),
         VarFileInfo([VarStruct('Translation', [1055, 1200])])

@@ -3,6 +3,8 @@
 import logging
 import os
 import queue
+import re
+import subprocess
 import threading
 import time
 import tkinter as tk
@@ -19,7 +21,10 @@ from .history import LaunchHistory, LaunchRecord
 from .hotkey import MOD_WIN, VK_SPACE, HotkeyService, HotkeySpec, captured_hotkey, format_hotkey
 from .indexer import Indexer
 from .models import FileResult, ScanProgress, ScanReport, SearchResults
-from .query import QueryError, fold_text, parse_plain_query
+from .query import QueryError, fold_text, fuzzy_score, parse_plain_query
+from . import rofi_modes
+from .watcher import LiveFileWatcher
+from .pins import MAX_HOME_PINS, PinStore, register_context_menu
 from .settings import MODE_CHOICES, MONITOR_CHOICES, POSITION_CHOICES, ROW_CHOICES, THEME_CHOICES, AppSettings, SettingsStore
 from .startup import is_startup_enabled, set_startup
 from .uninstall import launch_uninstall, search_installed_programs
@@ -29,10 +34,13 @@ from .windowing import activate_window, active_work_area, apply_popup_style, pop
 from . import windows as window_tools
 from . import icons
 from . import tray as tray_module
+from . import clipboard_history, quick, scripts as script_tools, sysactions, usertheme
+from .emoji_data import search_emoji
+from .frecency import FrecencyStore
 
 PLACEHOLDER = "Ara…"
 APP_REFRESH_INTERVAL = 15.0
-ICON_PREFETCH_LIMIT = 150
+ICON_PREFETCH_LIMIT = 400
 
 MODE_ALL = "Tümü"
 MODE_APPS = "Uygulamalar"
@@ -41,7 +49,19 @@ MODE_COMMANDS = "Komutlar"
 MODE_WEB = "Web"
 MODE_WINDOWS = "Pencereler"
 
-MODE_ORDER = (MODE_ALL, MODE_APPS, MODE_FILES, MODE_COMMANDS, MODE_WEB, MODE_WINDOWS)
+MODE_SSH = "SSH"
+MODE_PROCESSES = "Süreçler"
+MODE_CLIPBOARD = "Pano"
+MODE_EMOJI = "Emoji"
+MODE_SYSTEM = "Sistem"
+MODE_SCRIPTS = "Betikler"
+
+MODE_ORDER = (MODE_ALL, MODE_APPS, MODE_FILES, MODE_COMMANDS, MODE_WEB, MODE_WINDOWS,
+              MODE_SSH, MODE_PROCESSES, MODE_CLIPBOARD, MODE_EMOJI, MODE_SYSTEM, MODE_SCRIPTS)
+# Boş sorguda da liste gösteren ve kendi kaynağını arayan kipler.
+EXTRA_MODES = (MODE_SSH, MODE_PROCESSES, MODE_CLIPBOARD, MODE_EMOJI, MODE_SYSTEM, MODE_SCRIPTS)
+# Kip içinde de çalışması gereken -x komutları.
+GLOBAL_COMMAND = re.compile(r"^-[hsyqrpctk](\s|$)")
 MODE_LABELS = {
     MODE_ALL: "Uygulama · Dosya · Komut · Web",
     MODE_APPS: "Uygulama listesi",
@@ -49,6 +69,12 @@ MODE_LABELS = {
     MODE_COMMANDS: "Komut çalıştır",
     MODE_WEB: "Web araması",
     MODE_WINDOWS: "Açık pencereler",
+    MODE_CLIPBOARD: "Pano geçmişi",
+    MODE_EMOJI: "Emoji ve semboller",
+    MODE_SYSTEM: "Sistem komutları",
+    MODE_SSH: "SSH sunucuları",
+    MODE_PROCESSES: "Çalışan süreçler (Kill)",
+    MODE_SCRIPTS: "Özel betikler",
 }
 MODE_HINTS = {
     MODE_ALL: "Tümünde ara · Ctrl+Tab kip değiştir",
@@ -57,12 +83,25 @@ MODE_HINTS = {
     MODE_COMMANDS: "/komut yaz ve Enter'a bas · Ctrl+Tab kip değiştir",
     MODE_WEB: "!arama ya da !site.com yaz · Ctrl+Tab kip değiştir",
     MODE_WINDOWS: "Açık pencerelerden birini ara · Ctrl+Tab kip değiştir",
+    MODE_CLIPBOARD: "Kopyaladıklarını ara · Enter yapıştırır · Ctrl+Tab kip değiştir",
+    MODE_EMOJI: "Emoji ya da sembol ara · Enter yapıştırır · Ctrl+Tab kip değiştir",
+    MODE_SYSTEM: "Kilitle, uyku, kapat… · Ctrl+Tab kip değiştir",
+    MODE_SSH: "~/.ssh/config sunucuları · Enter terminalde SSH açar · Tab kip değiştir",
+    MODE_PROCESSES: "Çalışan süreçler · Enter sonlandırır · Alt+Enter PID kopyalar",
+    MODE_SCRIPTS: "scripts klasöründeki betikler · Ctrl+Tab kip değiştir",
 }
 
 FONT_FAMILY = "Cascadia Code"
-HEADER_HEIGHT = 54
+HEADER_HEIGHT = 44
+GRID_COLS = 4
+GRID_VISIBLE_ROWS = 2
+GRID_TILE_HEIGHT = 108
+SEARCH_PAD_X = 18
+SEARCH_PAD_TOP = 16
+SEARCH_PAD_BOTTOM = 10
 PANEL_BORDER = 2
 MAX_RESULTS = 500
+_LAYOUT_DEFAULTS = {"FONT_FAMILY": FONT_FAMILY, "HEADER_HEIGHT": HEADER_HEIGHT, "PANEL_BORDER": PANEL_BORDER}
 APP_ICON_SIZE = 28
 
 
@@ -104,6 +143,17 @@ class FinderApp:
         self.settings_store = settings_store or SettingsStore(database.path.parent / "settings.json")
         self.settings = self.settings_store.load()
         self.history = LaunchHistory(self.settings_store.path.parent / "history.json")
+        self.data_dir = self.settings_store.path.parent
+        self.config = usertheme.load_config(usertheme.theme_path(self.data_dir))
+        self._apply_layout_config()
+        self._mode_order = tuple(self.config.get("modes") or MODE_ORDER)
+        self.frecency = FrecencyStore(self.data_dir / "usage.json")
+        self.pins = PinStore(self.data_dir / "pinned.json")
+        self.clipboard = clipboard_history.ClipboardHistory()
+        self._clip_sequence = clipboard_history.sequence_number()
+        self._clip_after = None
+        self._script_active = None
+        self._timer_count = 0
         self.applications = application_index or ApplicationIndex()
         # Eski test/uyum bekleyen ad.
         self.application_index = self.applications
@@ -136,14 +186,18 @@ class FinderApp:
         self._mode = self.settings.default_mode
         self._hotkey_enabled = enable_hotkey
         self._tray_enabled = enable_tray
-        self._hotkey = HotkeyService(lambda: self.events.put(("toggle",)), spec=self.settings.hotkey_spec) if enable_hotkey else None
+        self._hotkey = HotkeyService(lambda: self.events.put(("toggle",)), spec=self.settings.hotkey_spec, win_search_override=self.settings.win_search_override, show_callback=lambda: self.events.put(("show",))) if enable_hotkey else None
         self.hotkey_available = False
         self._settings_window = None
         self._settings_hotkey_spec: HotkeySpec | None = None
         self._theme = self._resolve_theme()
         self._icon_cache: dict[str, object] = {}
+        self._raw_icon_cache: dict[str, object] = {}
         self._icon_data_cache: dict[str, tuple] = {}
+        self._grid_row_offset: int = 0
+        self._hover_key: str | None = None
         self._tray = None
+        self._watcher = None
         self._idle_status = self._ready_status()
 
         root.title("DosyaBul")
@@ -161,9 +215,13 @@ class FinderApp:
         self._event_after = root.after(50, self._drain_events)
         if auto_start:
             self._start_application_refresh()
+            self._clip_after = root.after(1000, self._poll_clipboard)
             if self._needs_initial_scan() or self.settings.refresh_on_start:
                 self._auto_after = root.after(80, self.start_scan)
             threading.Thread(target=self._warmup_first_use, daemon=True, name="DosyaBul-Warmup").start()
+            self._watcher = LiveFileWatcher(self.database)
+            self._watcher.start()
+            register_context_menu()
         root.protocol("WM_DELETE_WINDOW", self._on_window_close)
         if self._hotkey:
             self.hotkey_available = self._hotkey.start()
@@ -188,12 +246,20 @@ class FinderApp:
     def _ready_status(self) -> str:
         return f"{self.settings.hotkey} · Esc gizle" if self.hotkey_available else "Hazır"
 
+    def _apply_layout_config(self):
+        """theme.json'daki font, ?er?eve ve ba?l?k ?l??lerini uygular (yoksa varsay?lanlar)."""
+        values = dict(_LAYOUT_DEFAULTS)
+        values["FONT_FAMILY"] = self.config.get("font", values["FONT_FAMILY"])
+        values["HEADER_HEIGHT"] = self.config.get("header_height", values["HEADER_HEIGHT"])
+        values["PANEL_BORDER"] = self.config.get("border_width", values["PANEL_BORDER"])
+        globals().update(values)
+
     def _resolve_theme(self):
-        base = themes.resolve(self.settings.theme)
+        base = themes.resolve(self.config.get("extends") or self.settings.theme)
         accent = self.settings.accent_color
         if accent:
-            return base.with_colors(accent=accent, border=accent)
-        return base
+            base = base.with_colors(accent=accent, border=accent)
+        return usertheme.apply_overrides(base, usertheme.load_overrides(usertheme.theme_path(self.data_dir)))
 
     def _palette(self):
         return self._theme
@@ -265,6 +331,14 @@ class FinderApp:
         self._settings_icon = self._pad_icon(settings.zoom(scale))
         self._web_icon = self._pad_icon(web.zoom(scale))
         self._window_icon = self._pad_icon(window_icon.zoom(scale))
+        gscale = 3
+        self._grid_folder_icon = folder.zoom(gscale)
+        self._grid_file_icon = file_icon.zoom(gscale)
+        self._grid_app_icon = application.zoom(gscale)
+        self._grid_terminal_icon = terminal.zoom(gscale)
+        self._grid_settings_icon = settings.zoom(gscale)
+        self._grid_web_icon = web.zoom(gscale)
+        self._grid_window_icon = window_icon.zoom(gscale)
 
     def _pad_icon(self, image):
         """İkonun soluna ve sağına nefes payı ekler; seçim vurgusu tam genişlikte kalır."""
@@ -272,22 +346,26 @@ class FinderApp:
         self.root.tk.call(padded, "copy", image, "-to", 10, 0)
         return padded
 
-    def _rgba_photo(self, width, height, rgba, background):
-        """RGBA baytlarını, arka planla harmanlayarak Tk PhotoImage yapar."""
-        bg_r, bg_g, bg_b = int(background[1:3], 16), int(background[3:5], 16), int(background[5:7], 16)
-        image = tk.PhotoImage(master=self.root, width=width, height=height)
-        rows = []
-        for index in range(0, len(rgba), 4):
-            r, g, b, a = rgba[index], rgba[index + 1], rgba[index + 2], rgba[index + 3]
-            if a != 255:
-                r = (r * a + bg_r * (255 - a)) // 255
-                g = (g * a + bg_g * (255 - a)) // 255
-                b = (b * a + bg_b * (255 - a)) // 255
-            rows.append(f"#{r:02x}{g:02x}{b:02x}")
-        for y in range(height):
-            chunk = " ".join(rows[y * width:(y + 1) * width])
-            image.put("{" + chunk + "}", to=(0, y))
-        return image
+    def _rgba_photo(self, width, height, rgba, background=None):
+        """RGBA baytlar\u0131n\u0131 ger\u00e7ek alfa kanall\u0131 (saydam arka planl\u0131) Tk PhotoImage yapar."""
+        import struct
+        import zlib
+
+        stride = width * 4
+        raw_rows = b"".join(b"\x00" + rgba[y * stride:(y + 1) * stride] for y in range(height))
+
+        def png_chunk(tag: bytes, data: bytes) -> bytes:
+            crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+            return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+
+        ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+        png_bytes = (
+            b"\x89PNG\r\n\x1a\n"
+            + png_chunk(b"IHDR", ihdr)
+            + png_chunk(b"IDAT", zlib.compress(raw_rows, level=1))
+            + png_chunk(b"IEND", b"")
+        )
+        return tk.PhotoImage(master=self.root, data=png_bytes, format="png")
 
     def _load_app_icon(self, path):
         """Bir uygulama/kısayol yolundan gerçek ikonu yükler (önbellekli).
@@ -302,10 +380,12 @@ class FinderApp:
         data = self._icon_data_cache.pop(key, None)
         if data is None:
             data = icons.load_icon(path)
+        raw_image = None
         if data is not None:
             width, height, rgba = data
-            image = self._rgba_photo(width, height, rgba, self._theme.background)
-            image = self._pad_icon(image)
+            raw_image = self._rgba_photo(width, height, rgba, self._theme.background)
+            image = self._pad_icon(raw_image)
+        self._raw_icon_cache[key] = raw_image
         self._icon_cache[key] = image
         return image
 
@@ -320,17 +400,19 @@ class FinderApp:
         main.columnconfigure(0, weight=1)
         main.rowconfigure(1, weight=1)
 
-        # Rofi'nin "type-2" görünümü: arama alanı pencerenin üstüne tam oturur,
-        # vurgu rengiyle kaplanır; sonuçlar hemen altında akar.
-        self.search_box = tk.Frame(main, bg=theme.accent, height=HEADER_HEIGHT)
+        # Rofi Grid Launcher gorunumu: ustte iceriden bosluklu arama kutusu, altta 4x2 ikon izgarasi.
+        self.search_wrapper = tk.Frame(main, bg=theme.background)
+        self.search_wrapper.grid(row=0, column=0, sticky="ew", padx=SEARCH_PAD_X, pady=(SEARCH_PAD_TOP, SEARCH_PAD_BOTTOM))
+        self.search_box = tk.Frame(self.search_wrapper, bg=theme.accent, height=HEADER_HEIGHT, highlightbackground=theme.border, highlightthickness=1)
         search_box = self.search_box
-        search_box.grid(row=0, column=0, sticky="ew")
+        search_box.pack(fill="x", expand=True)
         search_box.pack_propagate(False)
-        self.search_canvas = tk.Canvas(search_box, width=32, height=HEADER_HEIGHT, bg=theme.accent, highlightthickness=0)
+        self.search_canvas = tk.Canvas(search_box, width=34, height=HEADER_HEIGHT, bg=theme.accent, highlightthickness=0)
         icon = self.search_canvas
-        icon.pack(side="left", padx=(10, 0))
-        self._search_oval = icon.create_oval(8, 14, 20, 26, outline=theme.accent_text, width=2)
-        self._search_line = icon.create_line(19, 25, 26, 32, fill=theme.accent_text, width=2)
+        icon.pack(side="left", padx=(8, 0))
+        # Arch/Rofi tarzı chevron simgesi (˄)
+        self._search_oval = icon.create_line(11, 27, 17, 15, 23, 27, fill=theme.accent_text, width=2, capstyle="round", joinstyle="round")
+        self._search_line = icon.create_line(13, 24, 21, 24, fill=theme.accent_text, width=2, capstyle="round")
         self.entry_box = tk.Frame(search_box, bg=theme.accent)
         entry_box = self.entry_box
         entry_box.pack(side="left", fill="both", expand=True)
@@ -338,20 +420,30 @@ class FinderApp:
                                      fg=theme.accent_text, insertbackground=theme.accent_text, selectbackground=theme.background,
                                      selectforeground=theme.accent_text, relief="flat", borderwidth=0, highlightthickness=0)
         self.search_entry.pack(fill="both", expand=True, padx=(2, 10), pady=6)
-        self.placeholder = tk.Label(entry_box, text=self._placeholder_text(), font=(FONT_FAMILY, 11), bg=theme.accent, fg=theme.text, anchor="w", cursor="xterm")
+        self.placeholder = tk.Label(entry_box, text=self._placeholder_text(), font=(FONT_FAMILY, 10), bg=theme.accent, fg=theme.text, anchor="w", cursor="xterm")
         self.placeholder.place(x=5, rely=0.5, anchor="w")
         self.placeholder.bind("<Button-1>", self.focus_search)
-        self.mode_chip = tk.Label(search_box, text=self._mode, font=(FONT_FAMILY, 9), bg=theme.accent, fg=theme.accent_text, anchor="e", cursor="hand2")
-        self.mode_chip.pack(side="right", padx=(6, 12))
+        self.mode_chip = tk.Label(search_box, text=self._mode, font=(FONT_FAMILY, 9), bg=theme.accent, fg=theme.text, anchor="e", cursor="hand2")
+        if self.config.get("mode_chip", True):
+            self.mode_chip.pack(side="right", padx=(6, 12))
         self.mode_chip.bind("<Button-1>", self.cycle_mode)
 
         self.table_box = tk.Frame(main, bg=theme.background)
-        self.table_box.grid(row=1, column=0, sticky="nsew")
+        self.table_box.grid(row=1, column=0, sticky="nsew", padx=(SEARCH_PAD_X - 4, SEARCH_PAD_X - 4), pady=(0, 12))
         self.table_box.columnconfigure(0, weight=1)
         self.table_box.rowconfigure(0, weight=1)
         self.tree = ttk.Treeview(self.table_box, columns=(), show="tree", selectmode="browse", style="Results.Treeview", takefocus=True)
         self.tree.column("#0", width=600, minwidth=260, stretch=True)
         self.tree.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+
+        self.grid_canvas = tk.Canvas(self.table_box, bg=theme.background, highlightthickness=0, borderwidth=0)
+        self.grid_canvas.grid(row=0, column=0, sticky="nsew")
+        self.grid_canvas.bind("<Button-1>", self._grid_click)
+        self.grid_canvas.bind("<Button-3>", self._grid_context_menu)
+        self.grid_canvas.bind("<Motion>", self._grid_motion)
+        self.grid_canvas.bind("<Leave>", self._grid_leave)
+        self.grid_canvas.bind("<MouseWheel>", self._grid_wheel)
+        self.grid_canvas.bind("<Configure>", lambda _e: self._draw_grid())
         self._make_icons()
         self.empty_label = tk.Label(self.table_box, text="Aramak için yazmaya başla", font=(FONT_FAMILY, 9), bg=theme.background, fg=theme.muted, wraplength=360, justify="center")
         self.empty_label.place(relx=0.5, rely=0.5, anchor="center")
@@ -361,15 +453,22 @@ class FinderApp:
 
         self.context_menu = tk.Menu(self.root, tearoff=False, font=(FONT_FAMILY, 10))
         self.context_menu.add_command(label="Aç", command=self.open_selected)
+        self.context_menu.add_command(label="DosyaBul'a sabitle", command=self.pin_selected)
+        self.context_menu.add_command(label="Sabitlemeyi kaldır", command=self.unpin_selected)
+        self.context_menu.add_separator()
         self.context_menu.add_command(label="Klasörde göster", command=self.reveal_selected)
         self.context_menu.add_command(label="Yolu kopyala", command=self.copy_selected)
+        self.context_menu.add_command(label="İkincil eylem    Alt+Enter", command=self.secondary_selected)
+        self.context_menu.add_command(label="Önizle    Ctrl+I", command=self.preview_selected)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="Ayarlar    Ctrl+,", command=self.open_settings)
         self.table_box.grid_remove()
 
     def _bind_shortcuts(self):
-        for shortcut in ("<Control-k>", "<Control-f>", "<F3>"):
+        for shortcut in ("<Control-f>", "<F3>"):
             self.root.bind(shortcut, self.focus_search)
+        for idx in range(1, 10):
+            self.root.bind(f"<Alt-Key-{idx}>", lambda _event, r=idx - 1: self.open_index(r))
         self.root.bind("<Control-Tab>", self.cycle_mode)
         self.root.bind("<Control-Shift-Tab>", lambda _event: self.cycle_mode(step=-1))
         self.root.bind("<F5>", self.refresh_all)
@@ -377,17 +476,25 @@ class FinderApp:
         self.root.bind("<Control-q>", lambda _event: self.close())
         self.root.bind("<Control-comma>", self.open_settings)
         self.root.bind("<FocusOut>", self._focus_lost)
-        self.search_entry.bind("<Down>", lambda _event: self._move_selection(1))
-        self.search_entry.bind("<Up>", lambda _event: self._move_selection(-1))
+        self.search_entry.bind("<Down>", lambda _event: self._move_grid_or_list(down=True))
+        self.search_entry.bind("<Up>", lambda _event: self._move_grid_or_list(down=False))
+        self.search_entry.bind("<Right>", self._entry_right)
+        self.search_entry.bind("<Left>", self._entry_left)
         self.search_entry.bind("<Control-j>", lambda _event: self._move_selection(1))
+        self.search_entry.bind("<Control-k>", lambda _event: self._move_selection(-1))
         self.search_entry.bind("<Control-n>", lambda _event: self._move_selection(1))
         self.search_entry.bind("<Control-p>", lambda _event: self._move_selection(-1))
         self.search_entry.bind("<Return>", self._open_search_result)
         self.search_entry.bind("<Shift-Return>", lambda _event: self.reveal_selected())
+        self.search_entry.bind("<Alt-Return>", lambda _event: self.secondary_selected())
+        self.search_entry.bind("<Control-i>", lambda _event: self.preview_selected())
+        self.search_entry.bind("<Control-d>", lambda _event: self.delete_clip_selected())
         self.search_entry.bind("<Tab>", self.cycle_mode)
         self.search_entry.bind("<Shift-Tab>", lambda _event: self.cycle_mode(step=-1))
         self.tree.bind("<Return>", lambda _event: self.open_selected())
         self.tree.bind("<Shift-Return>", lambda _event: self.reveal_selected())
+        self.tree.bind("<Alt-Return>", lambda _event: self.secondary_selected())
+        self.tree.bind("<Control-i>", lambda _event: self.preview_selected())
         self.tree.bind("<Control-c>", lambda _event: self.copy_selected())
 
     # ---- Görünürlük -----------------------------------------------------
@@ -396,18 +503,31 @@ class FinderApp:
     def visible(self) -> bool:
         return self._shown and self.root.state() != "withdrawn"
 
+    def _is_grid_active(self) -> bool:
+        items = tuple(self.items.values())
+        if not items:
+            return self._mode in (MODE_APPS, MODE_ALL, MODE_FILES, MODE_SYSTEM, MODE_SCRIPTS)
+        first_kind = items[0].kind
+        if first_kind in ("help", "copy", "note", "timer", "clip", "process", "ssh", "command", "emoji"):
+            return False
+        return self._mode in (MODE_APPS, MODE_ALL, MODE_FILES, MODE_SYSTEM, MODE_SCRIPTS)
+
     def _panel_height(self, rows: int | None = None) -> int:
+        header_total = HEADER_HEIGHT + SEARCH_PAD_TOP + SEARCH_PAD_BOTTOM + PANEL_BORDER * 2
         if not self.query_var.get().strip() and not self._show_rows_when_empty():
-            return HEADER_HEIGHT + PANEL_BORDER * 2
+            return header_total
+        if self._is_grid_active() and self.items:
+            grid_rows = 1 if len(self.items) <= GRID_COLS else GRID_VISIBLE_ROWS
+            return header_total + grid_rows * GRID_TILE_HEIGHT + 16
         rows = self._result_rows if rows is None else rows
         if not self.query_var.get().strip() and not rows:
             rows = len(self._recent_records()) or 1
-        return HEADER_HEIGHT + PANEL_BORDER * 2 + max(1, min(self.settings.visible_rows, rows)) * self._row_height
+        return header_total + 12 + max(1, min(self.settings.visible_rows, rows)) * self._row_height
 
     def _show_rows_when_empty(self) -> bool:
         if self._mode in (MODE_ALL, MODE_APPS):
             return bool(self._recent_items())
-        return self._mode in (MODE_COMMANDS, MODE_WEB, MODE_WINDOWS)
+        return self._mode in (MODE_COMMANDS, MODE_WEB, MODE_WINDOWS) + EXTRA_MODES
 
     def _position_popup(self, rows: int | None = None):
         width, height, x, y = popup_geometry(
@@ -423,8 +543,8 @@ class FinderApp:
         was_visible = self.visible
         self._shown = True
         self._cancel_timer("_focus_after")
-        if not was_visible and not self.query_var.get().strip() and self._mode in (MODE_ALL, MODE_APPS, MODE_COMMANDS):
-            self._schedule_search(0)
+        if not was_visible and not self.query_var.get().strip() and self._mode in (MODE_ALL, MODE_APPS, MODE_COMMANDS) + EXTRA_MODES:
+            self._begin_search()
         if self.query_var.get().strip() or self._show_rows_when_empty():
             self.table_box.grid()
         else:
@@ -482,6 +602,23 @@ class FinderApp:
             self.tree.focus_set()
         return "break"
 
+    def _move_grid_or_list(self, *, down: bool):
+        if self._is_grid_active() and len(self.items) > GRID_COLS:
+            return self._move_selection(GRID_COLS if down else -GRID_COLS)
+        return self._move_selection(1 if down else -1)
+
+    def _entry_right(self, _event=None):
+        if self._is_grid_active() and self.items:
+            if not self.query_var.get() or self.search_entry.index("insert") >= len(self.query_var.get()):
+                return self._move_selection(1)
+        return None
+
+    def _entry_left(self, _event=None):
+        if self._is_grid_active() and self.items:
+            if not self.query_var.get() or self.search_entry.index("insert") == 0:
+                return self._move_selection(-1)
+        return None
+
     def _move_selection(self, step: int):
         children = self.tree.get_children()
         if not children:
@@ -491,10 +628,13 @@ class FinderApp:
             index = children.index(selection[0]) if selection else (-1 if step > 0 else 0)
         except ValueError:
             index = -1
-        target = children[(index + step) % len(children)]
+        target_idx = (index + step) % len(children)
+        target = children[target_idx]
         self.tree.selection_set(target)
         self.tree.focus(target)
         self.tree.see(target)
+        self._ensure_grid_visible(target_idx)
+        self._draw_grid()
         return "break"
 
     def clear_query(self):
@@ -511,6 +651,7 @@ class FinderApp:
         self.mode_var.set(mode)
         if hasattr(self, "mode_chip"):
             self.mode_chip.configure(text=mode)
+        self._refresh_mode_pills()
         if self.visible:
             if self.query_var.get().strip() or self._show_rows_when_empty():
                 self.table_box.grid()
@@ -520,12 +661,24 @@ class FinderApp:
             self._schedule_search(0)
         return "break"
 
+    def _refresh_mode_pills(self):
+        pass
+
+    def open_index(self, index: int):
+        children = self.tree.get_children()
+        if 0 <= index < len(children):
+            target = children[index]
+            self.tree.selection_set(target)
+            self.tree.focus(target)
+            return self.open_selected()
+        return "break"
+
     def cycle_mode(self, _event=None, *, step: int = 1):
         try:
-            index = MODE_ORDER.index(self._mode)
+            index = self._mode_order.index(self._mode)
         except ValueError:
             index = 0
-        return self.set_mode(MODE_ORDER[(index + step) % len(MODE_ORDER)])
+        return self.set_mode(self._mode_order[(index + step) % len(self._mode_order)])
 
     # ---- Arama akışı ----------------------------------------------------
 
@@ -575,7 +728,16 @@ class FinderApp:
             ("-s", "", "DosyaBul Ayarları", "Ayarlar penceresini açar"),
             ("-r ", "program", "Program kaldır", "Kurulu programı arar, kaldırma sihirbazını açar"),
             ("/", "komut", "Terminal komutu", "Komutu seçili terminalde çalıştırır"),
-            ("!", "arama", "Web araması", "Tarayıcıda arar ya da adresi açar"),
+            ("!", "arama", "Web araması", "Tarayıcıda arar ya da adresi açar; !yt, !gh, !tr gibi kısayollar"),
+            ("= ", "2*(3+4)", "Hesap makinesi", "Sonucu Enter ile kopyalar; 10 km mi gibi birimler de çevrilir"),
+            ("n: ", "not", "Hızlı not", "notes.txt dosyasına ekler"),
+            ("timer ", "10m çay", "Zamanlayıcı", "Süre dolunca uyarır (sa, dk, sn)"),
+            (":", "gülümseme", "Emoji", "Emoji ve sembol arar, Enter ile yapıştırır"),
+            ("ssh ", "sunucu", "SSH bağlantısı", "~/.ssh/config sunucusuna terminalden bağlanır"),
+            ("-k ", "süreç", "Süreç sonlandır (Kill)", "Çalışan süreçleri belleğe göre listeler, Enter ile kapatır"),
+            ("-p", "", "Sistem komutları", "Kilitle, uyku, yeniden başlat, kapat…"),
+            ("-c", "", "Pano geçmişi", "Son kopyalananları listeler"),
+            ("-t", "", "Tema dosyası", "theme.json dosyasını açar (renkleri özelleştir)"),
             ("-y", "", "Yenile", "Uygulama listesini ve dosya indeksini yeniler"),
             ("-h", "", "Yardım", "Bu listeyi gösterir"),
             ("-q", "", "Çıkış", "DosyaBul'u tamamen kapatır"),
@@ -592,6 +754,10 @@ class FinderApp:
         ]
         shortcut_rows = (
             ("Tab / Ctrl+Tab", "Kip değiştir"),
+            ("Shift+Enter", "Dosya Gezgini'nde göster"),
+            ("Alt+Enter", "İkincil eylem: terminalde aç / pencereyi kapat / yönetici olarak çalıştır"),
+            ("Ctrl + I", "Seçili dosyayı önizle"),
+            ("Ctrl + D", "Pano kipinde seçili girdiyi sil"),
             ("Ctrl + ,", "Ayarları aç"),
             ("Alt + F2", "Paneli göster / gizle"),
             ("Esc", "Paneli gizle"),
@@ -606,8 +772,8 @@ class FinderApp:
     def _recent_records(self) -> tuple[LaunchRecord, ...]:
         """Boş sorguda gösterilecek son kullanılan uygulama ve komutlar."""
         if self._mode == MODE_APPS:
-            # Ana sayfa hem son uygulamaları hem de son /komutları gösterir.
-            categories = ("app", "command")
+            # Gerçek kullanımda 4x2 uygulama ızgarasında yalnızca uygulamalar gösterilir.
+            categories = ("app",) if self.auto_start else ("app", "command")
         elif self._mode == MODE_COMMANDS:
             categories = ("command",)
         elif self._mode == MODE_ALL:
@@ -627,6 +793,10 @@ class FinderApp:
         return tuple(records)
 
     def _recent_items(self) -> tuple[ResultItem, ...]:
+        if self._mode in (MODE_APPS, MODE_ALL):
+            pinned = self.pins.recent(MAX_HOME_PINS)
+            if pinned or self.auto_start:
+                return tuple(pin.to_result_item(index) for index, pin in enumerate(pinned))
         items = []
         for index, record in enumerate(self._recent_records()):
             if record.kind == "command":
@@ -640,32 +810,88 @@ class FinderApp:
         return tuple(items)
 
     def _placeholder_text(self) -> str:
-        return "Son kullanılanlar · ara…" if self._recent_items() else PLACEHOLDER
+        if not self.auto_start and self._recent_items() and not self.pins.load():
+            return "Son kullanılanlar · ara…"
+        return self.config.get("placeholder", PLACEHOLDER)
 
     def _remember_launch(self, item: ResultItem) -> None:
         if item.kind == "command" or item.kind.startswith("app:"):
             self.history.record(LaunchRecord(item.kind, item.name, item.target, item.detail))
+        self._record_usage(item)
+
+    @staticmethod
+    def _usage_signature(item: ResultItem) -> str | None:
+        if item.kind.startswith("app:"):
+            return FrecencyStore.signature("app", item.target)
+        if item.kind in ("file", "directory"):
+            return FrecencyStore.signature("file", item.target)
+        if item.kind.startswith("custom:"):
+            return FrecencyStore.signature(item.kind, item.target)
+        return None
+
+    def _record_usage(self, item: ResultItem) -> None:
+        signature = self._usage_signature(item)
+        if signature:
+            self.frecency.record(signature)
+
+    def _rank_items(self, items) -> tuple[ResultItem, ...]:
+        """Sık/yakın kullanılan uygulama ve dosyaları öne alır."""
+        return self.frecency.rank(items, lambda item: self._usage_signature(item) or "")
 
     def _search_apps(self, text: str, limit: int) -> tuple[ResultItem, ...]:
         if not self.settings.search_apps:
             return ()
-        return tuple(
+        found = self._rank_items(
             ResultItem(app.key, app.name, app.detail, "app:" + app.launch_kind, app.target)
             for app in self.applications.search(text, limit=limit)
         )
+        return self._quick_items(text) + self._custom_items(text) + found
+
+    def _custom_items(self, text: str) -> tuple[ResultItem, ...]:
+        """theme.json 'entries' listesindeki ?zel girdiler."""
+        terms = tuple(part for part in fold_text(text).split() if part)
+        if not terms or not self.config.get("entries"):
+            return ()
+        found = []
+        for entry in self.config["entries"]:
+            key = fold_text(entry["name"] + " " + entry["keywords"])
+            if all(term in key for term in terms):
+                found.append(ResultItem(
+                    f"custom:{len(found)}:{entry['name']}", entry["name"], f"?zel ? {entry['action']} ? {entry['value']}",
+                    "custom:" + entry["action"], entry["value"],
+                ))
+        return self._rank_items(found)[:10]
+
+    def _quick_items(self, text: str) -> tuple[ResultItem, ...]:
+        """Önek gerektirmeyen hesap ve birim çevirme sonuçları."""
+        converted = quick.convert_units(text)
+        if converted:
+            return (ResultItem("quick:unit", f"{text.strip()}  =  {converted}", "Birim çevirici · Enter ile kopyala", "copy", converted),)
+        if quick.looks_like_math(text):
+            try:
+                result = quick.calculate(text)
+            except quick.CalcError:
+                return ()
+            return (ResultItem("quick:calc", f"{text.strip()}  =  {result}", "Hesap makinesi · Enter ile kopyala", "copy", result),)
+        return ()
+
+    def _file_items(self, files) -> tuple[ResultItem, ...]:
+        return self._rank_items(self._file_item(item) for item in files)
 
     def _search_windows(self, text: str, limit: int) -> tuple[ResultItem, ...]:
         if not self.settings.search_windows:
             return ()
-        terms = tuple(part for part in fold_text(text).split() if part)
+        q = (text or "").strip()
         found = []
         for window in window_tools.list_windows():
-            haystack = fold_text(window.title)
-            if all(term in haystack for term in terms):
-                found.append(window)
-            if len(found) >= limit:
-                break
-        found.sort(key=lambda window: len(window.title))
+            if not q:
+                found.append((1000 - len(window.title), window))
+            else:
+                sc = fuzzy_score(q, window.title)
+                if sc is not None:
+                    found.append((sc, window))
+        found.sort(key=lambda pair: (-pair[0], len(pair[1].title)))
+        found = [w for _, w in found[:limit]]
         return tuple(
             ResultItem(f"window:{window.handle}", window.title, f"Pencere · {window.pid}", "window", str(window.handle))
             for window in found[:limit]
@@ -682,7 +908,7 @@ class FinderApp:
         window_items = self._search_windows(text, 30)
         reserved = len(settings_items) + len(application_items) + len(window_items)
         files = self._search_files(parsed, MAX_RESULTS - reserved, cancel)
-        items = settings_items + application_items + window_items + tuple(self._file_item(item) for item in files.files)
+        items = settings_items + application_items + window_items + self._file_items(files.files)
         total = len(settings_items) + len(application_items) + len(window_items) + files.total
         return LauncherResults(items[:MAX_RESULTS], total)
 
@@ -690,7 +916,7 @@ class FinderApp:
         """Aktif kipe göre yalnızca ilgili kaynakları arar."""
         if self._mode == MODE_FILES:
             files = self._search_files(parsed, MAX_RESULTS, cancel or threading.Event())
-            return LauncherResults(tuple(self._file_item(item) for item in files.files), files.total)
+            return LauncherResults(self._file_items(files.files), files.total)
         if self._mode == MODE_APPS:
             return LauncherResults(self._search_apps(text, MAX_RESULTS), 0)
         if self._mode == MODE_WINDOWS:
@@ -702,6 +928,10 @@ class FinderApp:
         if self._closing:
             return
         text = self.query_var.get().strip()
+        if self._mode in EXTRA_MODES and not GLOBAL_COMMAND.match(text):
+            items, hint = self._extra_items(text)
+            self._render_instant(items, hint)
+            return
         if not text:
             self._pending_open_generation = None
             recent = self._recent_items()
@@ -814,10 +1044,31 @@ class FinderApp:
                 self._pending_open_generation = None
                 self.open_selected()
             return
+        if text == "-p" or text.startswith("-p "):
+            items, hint = self._system_items(text[2:].strip())
+            self._render_instant(items, hint)
+            return
+        if text == "-k" or text.startswith("-k "):
+            items, hint = self._process_items(text[2:].strip())
+            self._render_instant(items, hint)
+            return
+        if text == "-c" or text.startswith("-c "):
+            items, hint = self._clip_items(text[2:].strip())
+            self._render_instant(items, hint)
+            return
+        if text == "-t" or text.startswith("-t "):
+            path = usertheme.theme_path(self.data_dir)
+            self._render_instant((ResultItem("themefile", "Tema dosyasını aç (theme.json)", f"-t · {path}", "themefile", str(path)),))
+            return
+        if self._mode in (MODE_ALL, MODE_APPS):
+            special = self._special_items(text)
+            if special is not None:
+                self._render_instant(*special)
+                return
         if text.startswith("!") and self._mode in (MODE_ALL, MODE_WEB):
             web_text = text[1:].strip()
             if web_text:
-                target = resolve_web_input(web_text, self.settings.search_engine)
+                target = resolve_web_input(web_text, self.settings.search_engine, self.settings.web_shortcuts)
                 results = LauncherResults((ResultItem("web", target.text, target.detail, "web", target.url),), 1)
                 self.render_results(results)
                 self._last_results_generation = self._search_generation
@@ -833,7 +1084,7 @@ class FinderApp:
             return
         if self._mode == MODE_WEB:
             try:
-                target = resolve_web_input(text, self.settings.search_engine)
+                target = resolve_web_input(text, self.settings.search_engine, self.settings.web_shortcuts)
             except ValueError:
                 self.render_results(LauncherResults((), 0))
                 return
@@ -910,6 +1161,244 @@ class FinderApp:
 
         future.add_done_callback(complete)
 
+    # ---- Hızlı araçlar ve ek kipler --------------------------------------
+
+    def _render_instant(self, items, hint: str | None = None):
+        """Senkron üretilen sonuçları gösterir; Enter beklemişse ilk öğeyi açar."""
+        items = tuple(items)
+        self.render_results(LauncherResults(items, len(items)))
+        if not items and hint:
+            self._result_rows = 1
+            self._show_empty(hint)
+            if self.visible:
+                self._position_popup()
+        self._last_results_generation = self._search_generation
+        if self._pending_open_generation == self._search_generation:
+            self._pending_open_generation = None
+            self.open_selected()
+
+    @property
+    def notes_path(self) -> Path:
+        return self.data_dir / "notes.txt"
+
+    def _special_items(self, text: str):
+        """=hesap, n: not, timer ve :emoji önekleri. Önek yoksa None."""
+        if text.startswith("="):
+            expression = text[1:].strip()
+            if not expression:
+                return (), "İfade yaz · Örnek: = 2*(3+4)"
+            try:
+                result = quick.calculate(expression)
+            except quick.CalcError as error:
+                return (), str(error)
+            return (ResultItem("quick:calc", f"{expression}  =  {result}", "Hesap makinesi · Enter ile kopyala", "copy", result),), None
+        note = quick.parse_note(text)
+        if note is not None:
+            if not note:
+                return (ResultItem("notefile", "Not dosyasını aç", f"n: · {self.notes_path}", "notefile", str(self.notes_path)),), None
+            return (ResultItem("note:add", f"Not ekle: {note}", "Enter ile notes.txt dosyasına kaydet", "note", note),), None
+        if quick.is_timer_prefix(text):
+            parsed = quick.parse_timer(text)
+            if parsed is None:
+                return (), "Süre yaz · Örnek: timer 10m çay  ·  timer 1sa30dk"
+            seconds, label = parsed
+            title = f"Zamanlayıcı: {quick.format_duration(seconds)}" + (f" · {label}" if label else "")
+            return (ResultItem("timer:new", title, "Enter ile başlat", "timer", f"{seconds}|{label}"),), None
+        if text.startswith(":"):
+            return self._emoji_items(text[1:].strip())
+        if text.casefold() == "ssh" or text.casefold().startswith("ssh "):
+            return self._ssh_items(text[3:].strip())
+        return None
+
+    def _extra_items(self, text: str):
+        if self._mode == MODE_SSH:
+            return self._ssh_items(text)
+        if self._mode == MODE_PROCESSES:
+            return self._process_items(text)
+        if self._mode == MODE_CLIPBOARD:
+            return self._clip_items(text)
+        if self._mode == MODE_EMOJI:
+            return self._emoji_items(text)
+        if self._mode == MODE_SYSTEM:
+            return self._system_items(text)
+        return self._script_items(text)
+
+    def _ssh_items(self, text: str):
+        hosts = rofi_modes.search_ssh_hosts(text)
+        items = list(
+            ResultItem(f"ssh:{host.alias}", host.alias, host.detail, "ssh", host.alias)
+            for host in hosts
+        )
+        q = (text or "").strip()
+        if q and not any(h.alias.casefold() == q.casefold() for h in hosts):
+            items.insert(0, ResultItem(f"ssh:direct:{q}", q, "SSH · Enter ile doğrudan bağlan", "ssh", q))
+        return tuple(items), "~/.ssh/config içinde sunucu bulunamadı · kullanıcı@sunucu yaz"
+
+    def _process_items(self, text: str):
+        procs = rofi_modes.search_processes(text)
+        items = tuple(
+            ResultItem(f"process:{proc.pid}", proc.display_title, f"Süreç · Enter sonlandırır · Alt+Enter PID ({proc.pid}) kopyalar", "process", str(proc.pid))
+            for proc in procs
+        )
+        return items, "Eşleşen süreç bulunamadı" 
+
+    def _clip_items(self, text: str):
+        if not self.settings.clipboard_history:
+            return (), "Pano geçmişi kapalı · Ayarlardan aç"
+        entries = self.clipboard.search(text)
+        items = tuple(
+            ResultItem(f"clip:{index}", clipboard_history.display_text(entry), "Pano · Enter yapıştırır · Ctrl+D siler", "clip", entry)
+            for index, entry in enumerate(entries)
+        )
+        return items, "Pano geçmişi boş · bir şey kopyala" if not text else "Eşleşen pano girdisi yok"
+
+    def _emoji_items(self, text: str):
+        found = search_emoji(text)
+        items = tuple(
+            ResultItem(f"emoji:{index}", f"{character}   {name}", "Emoji · Enter yapıştırır", "emoji", character)
+            for index, (character, name) in enumerate(found)
+        )
+        return items, "Emoji bulunamadı"
+
+    def _system_items(self, text: str):
+        items = tuple(
+            ResultItem(f"system:{action.id}", action.name, "Sistem · onay ister" if action.confirm else "Sistem", "system", action.id)
+            for action in sysactions.search_actions(text)
+        )
+        return items, "Eşleşen sistem komutu yok"
+
+    def _script_items(self, text: str):
+        script_tools.ensure_example(self.data_dir)
+        items = tuple(
+            ResultItem(f"script:{path.name}", path.stem, f"Betik · {path.suffix} · Enter çalıştırır", "script", str(path))
+            for path in script_tools.list_scripts(self.data_dir, text)
+        )
+        return items, "scripts klasörüne .py, .ps1, .cmd ya da .bat betik ekle"
+
+    def _run_script_async(self, path: str, argument: str | None = None):
+        """Betiği arka planda çalıştırır; çıktı satırları yeni liste olur."""
+        self.status_var.set("Betik çalışıyor…")
+        self._script_active = path
+        generation = self._search_generation
+        script = Path(path)
+
+        def work():
+            try:
+                lines = script_tools.run_script(script, argument)
+            except (OSError, ValueError) as error:
+                self.events.put(("script", generation, script, argument, (), error))
+            else:
+                self.events.put(("script", generation, script, argument, lines, None))
+
+        self.executor.submit(work)
+
+    def _script_finished(self, script: Path, argument, lines, error):
+        self.status_var.set(self._idle_status)
+        if error:
+            messagebox.showerror("Betik çalıştırılamadı", str(error), parent=self.root)
+            return
+        if not lines:
+            if argument is not None:
+                self.hide_popup()
+                return
+            self._render_instant((), f"{script.stem} çıktı üretmedi")
+            return
+        items = tuple(
+            ResultItem(f"scriptline:{index}", line, f"{script.stem} · Enter seçer", "scriptline", line)
+            for index, line in enumerate(lines)
+        )
+        self._script_active = str(script)
+        self.render_results(LauncherResults(items, len(items)))
+        self._last_results_generation = self._search_generation
+
+    def _set_clipboard(self, text: str):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.root.update_idletasks()
+        self._clip_sequence = clipboard_history.sequence_number()
+        if self.settings.clipboard_history:
+            self.clipboard.add(text)
+
+    def _poll_clipboard(self):
+        self._clip_after = None
+        if self._closing:
+            return
+        if self.settings.clipboard_history:
+            sequence = clipboard_history.sequence_number()
+            if sequence != self._clip_sequence:
+                self._clip_sequence = sequence
+                try:
+                    self.clipboard.add(self.root.clipboard_get())
+                except tk.TclError:
+                    pass
+        self._clip_after = self.root.after(800, self._poll_clipboard)
+
+    def _paste_text(self, text: str):
+        """Metni panoya koyar, paneli gizler ve önceki pencereye yapıştırır."""
+        self._set_clipboard(text)
+        self.hide_popup()
+        self.root.after(180, clipboard_history.send_paste)
+
+    def _start_timer(self, seconds: int, label: str):
+        self._timer_count += 1
+        self.root.after(int(seconds * 1000), lambda: self._timer_alert(label, seconds))
+
+    def _timer_alert(self, label: str, seconds: int):
+        if self._closing:
+            return
+        theme = self._palette()
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        except (ImportError, RuntimeError):
+            pass
+        window = tk.Toplevel(self.root)
+        window.title("DosyaBul · Zamanlayıcı")
+        window.configure(bg=theme.background, highlightbackground=theme.border, highlightthickness=2)
+        window.attributes("-topmost", True)
+        tk.Label(window, text="⏰  Süre doldu", bg=theme.background, fg=theme.border, font=(FONT_FAMILY, 13, "bold")).pack(padx=30, pady=(18, 4))
+        tk.Label(window, text=(label or quick.format_duration(seconds)), bg=theme.background, fg=theme.text, font=(FONT_FAMILY, 10), wraplength=320).pack(padx=30)
+        button = tk.Button(window, text="Tamam", command=window.destroy, bg=theme.accent, fg=theme.accent_text, relief="flat", padx=18, pady=6)
+        button.pack(pady=16)
+        window.bind("<Return>", lambda _event: window.destroy())
+        window.bind("<Escape>", lambda _event: window.destroy())
+        window.update_idletasks()
+        area = active_work_area(self.root)
+        width, height = max(300, window.winfo_reqwidth()), window.winfo_reqheight()
+        window.geometry(f"{width}x{height}+{area.left + (area.width - width) // 2}+{area.top + (area.height - height) // 3}")
+        window.lift()
+        window.focus_force()
+
+    def _run_custom(self, item: ResultItem):
+        action = item.kind.split(":", 1)[1]
+        try:
+            if action == "url":
+                self.hide_popup()
+                if not open_web(item.target):
+                    raise OSError("Adres a??lamad? (yaln?zca http/https desteklenir).")
+            elif action == "path":
+                self.hide_popup()
+                os.startfile(item.target)
+            elif action == "terminal":
+                self.hide_popup()
+                launch_terminal_command(item.target, self.settings.terminal_directory, self.settings.terminal_application)
+            else:
+                self.hide_popup()
+                subprocess.Popen(item.target, shell=True, cwd=self.settings.terminal_directory, creationflags=0x08000000 if os.name == "nt" else 0)
+        except (OSError, ValueError) as error:
+            self.show_popup()
+            messagebox.showerror("Girdi ?al??t?r?lamad?", str(error), parent=self.root)
+        else:
+            self._record_usage(item)
+
+    def _open_path_or_error(self, path: str, title: str):
+        try:
+            self.hide_popup()
+            os.startfile(path)
+        except OSError as error:
+            self.show_popup()
+            messagebox.showerror(title, str(error), parent=self.root)
+
     def _open_search_result(self, _event=None):
         if self._last_results_generation == self._search_generation and self._search_after is None:
             return self.open_selected()
@@ -953,6 +1442,13 @@ class FinderApp:
         else:
             self._result_rows = 1
             self._show_empty("Sonuç bulunamadı.")
+        self._grid_row_offset = 0
+        if normalized.items and self._is_grid_active():
+            self.grid_canvas.grid()
+            tk.Misc.tkraise(self.grid_canvas)
+            self._draw_grid()
+        else:
+            self.grid_canvas.grid_remove()
         self._selection_changed()
         if self.visible:
             if self.query_var.get().strip() or self._show_rows_when_empty():
@@ -960,6 +1456,8 @@ class FinderApp:
             else:
                 self.table_box.grid_remove()
             self._position_popup()
+            if normalized.items and self._is_grid_active():
+                self._draw_grid()
 
     def _icon_for(self, item: ResultItem):
         if item.kind.startswith("app:"):
@@ -978,8 +1476,16 @@ class FinderApp:
             return self._settings_icon
         if item.kind == "web":
             return self._web_icon
-        if item.kind == "window":
+        if item.kind in ("clip", "note", "notefile", "themefile"):
+            return self._file_icon
+        if item.kind in ("emoji", "copy"):
+            return self._settings_icon
+        if item.kind.startswith("custom:"):
+            return self._app_icon
+        if item.kind in ("system", "timer", "process", "window"):
             return self._window_icon
+        if item.kind in ("script", "scriptline", "ssh"):
+            return self._terminal_icon
         return self._file_icon
 
     def _app_row_icon(self, target):
@@ -989,6 +1495,146 @@ class FinderApp:
             if image is not None:
                 return image
         return self._app_icon
+
+    def _grid_icon_for(self, item: ResultItem):
+        if item.kind.startswith("app:") and item.target and os.path.isfile(item.target):
+            key = str(item.target).casefold()
+            if key not in self._raw_icon_cache:
+                self._load_app_icon(item.target)
+            raw = self._raw_icon_cache.get(key)
+            if raw is not None:
+                return raw
+            return self._grid_app_icon
+        if item.kind == "directory":
+            return self._grid_folder_icon
+        if item.kind in ("command", "script", "scriptline", "ssh"):
+            return self._grid_terminal_icon
+        if item.kind in ("settings", "help", "emoji", "copy"):
+            return self._grid_settings_icon
+        if item.kind == "web":
+            return self._grid_web_icon
+        if item.kind in ("system", "timer", "process", "window"):
+            return self._grid_window_icon
+        if item.kind.startswith("app:") or item.kind.startswith("custom:") or item.kind in ("uninstall", "refresh", "quit"):
+            return self._grid_app_icon
+        return self._grid_file_icon
+
+    def _ensure_grid_visible(self, index: int):
+        row = index // GRID_COLS
+        if row < self._grid_row_offset:
+            self._grid_row_offset = row
+        elif row >= self._grid_row_offset + GRID_VISIBLE_ROWS:
+            self._grid_row_offset = row - GRID_VISIBLE_ROWS + 1
+
+    @staticmethod
+    def _draw_rounded_box(canvas: tk.Canvas, x1: float, y1: float, x2: float, y2: float, r: float = 10, **kwargs):
+        pts = [
+            x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+            x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+            x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
+        ]
+        return canvas.create_polygon(pts, smooth=True, **kwargs)
+
+    def _draw_grid(self):
+        if not hasattr(self, "grid_canvas"):
+            return
+        self.grid_canvas.delete("all")
+        items = list(self.items.values())
+        if not items or not self._is_grid_active():
+            return
+        theme = self._palette()
+        width = max(self.grid_canvas.winfo_width(), self.settings.panel_width - SEARCH_PAD_X * 2)
+        col_w = width / GRID_COLS
+        sel = self.tree.selection()
+        selected_key = sel[0] if sel else None
+        start_idx = self._grid_row_offset * GRID_COLS
+        visible_slice = items[start_idx : start_idx + GRID_COLS * GRID_VISIBLE_ROWS]
+        for local_i, item in enumerate(visible_slice):
+            col = local_i % GRID_COLS
+            row = local_i // GRID_COLS
+            x0 = col * col_w + 5
+            y0 = row * GRID_TILE_HEIGHT + 4
+            x1 = (col + 1) * col_w - 5
+            y1 = (row + 1) * GRID_TILE_HEIGHT - 4
+            cx = (x0 + x1) / 2
+            if item.key == selected_key:
+                self._draw_rounded_box(self.grid_canvas, x0, y0, x1, y1, r=12, fill=theme.surface, outline=theme.border, width=1)
+            elif item.key == self._hover_key:
+                self._draw_rounded_box(self.grid_canvas, x0, y0, x1, y1, r=12, fill=theme.surface, outline="", width=0)
+            icon_img = self._grid_icon_for(item)
+            if icon_img is not None:
+                self.grid_canvas.create_image(cx, y0 + 36, image=icon_img, anchor="center")
+            label = item.name.strip()
+            max_px = max(60, int(col_w - 22))
+            grid_font = tkfont.Font(root=self.root, family=FONT_FAMILY, size=9)
+            if grid_font.measure(label) > max_px:
+                while len(label) > 1 and grid_font.measure(label + "…") > max_px:
+                    label = label[:-1]
+                label = label.rstrip() + "…"
+            self.grid_canvas.create_text(
+                cx, y0 + 80, text=label, fill=theme.text,
+                font=(FONT_FAMILY, 9), anchor="center",
+            )
+
+    def _grid_index_at(self, x: int, y: int) -> int | None:
+        items = list(self.items.values())
+        if not items:
+            return None
+        width = max(1, self.grid_canvas.winfo_width())
+        col = min(GRID_COLS - 1, max(0, int(x * GRID_COLS / width)))
+        row = max(0, int(y // GRID_TILE_HEIGHT))
+        if row >= GRID_VISIBLE_ROWS:
+            return None
+        idx = (self._grid_row_offset + row) * GRID_COLS + col
+        return idx if 0 <= idx < len(items) else None
+
+    def _grid_click(self, event):
+        idx = self._grid_index_at(event.x, event.y)
+        if idx is not None:
+            children = self.tree.get_children()
+            if 0 <= idx < len(children):
+                self.tree.selection_set(children[idx])
+                self.tree.focus(children[idx])
+                self._draw_grid()
+                self.open_selected()
+
+    def _grid_context_menu(self, event):
+        idx = self._grid_index_at(event.x, event.y)
+        if idx is not None:
+            children = self.tree.get_children()
+            if 0 <= idx < len(children):
+                self.tree.selection_set(children[idx])
+                self.tree.focus(children[idx])
+                self._draw_grid()
+                self._suspend_hide = True
+                try:
+                    self.context_menu.tk_popup(event.x_root, event.y_root)
+                finally:
+                    self.context_menu.grab_release()
+                    self._suspend_hide = False
+
+    def _grid_motion(self, event):
+        idx = self._grid_index_at(event.x, event.y)
+        items = list(self.items.values())
+        new_hover = items[idx].key if (idx is not None and idx < len(items)) else None
+        if new_hover != self._hover_key:
+            self._hover_key = new_hover
+            self._draw_grid()
+
+    def _grid_leave(self, _event):
+        if self._hover_key is not None:
+            self._hover_key = None
+            self._draw_grid()
+
+    def _grid_wheel(self, event):
+        items = list(self.items.values())
+        total_rows = (len(items) + GRID_COLS - 1) // GRID_COLS
+        max_offset = max(0, total_rows - GRID_VISIBLE_ROWS)
+        step = -1 if event.delta > 0 else 1
+        new_offset = max(0, min(max_offset, self._grid_row_offset + step))
+        if new_offset != self._grid_row_offset:
+            self._grid_row_offset = new_offset
+            self._draw_grid()
 
     def _show_empty(self, text):
         self.empty_label.configure(text=text)
@@ -1001,6 +1647,16 @@ class FinderApp:
     def _selection_changed(self, _event=None):
         item = self._selected_item()
         self.selected_path_var.set(item.path if item else "")
+        if item and self._toast_after is None:
+            children = self.tree.get_children()
+            rank = children.index(item.key) if item.key in children else -1
+            hint = f"Alt+{rank + 1} · " if 0 <= rank < 9 else ""
+            detail = (item.detail or item.path or "").strip()
+            if len(detail) > 38:
+                detail = detail[:37] + "…"
+            self.status_var.set(f"{hint}{detail}" if detail else self._idle_status)
+        elif self._toast_after is None:
+            self.status_var.set(self._idle_status)
 
     def _double_click(self, event):
         row = self.tree.identify_row(event.y)
@@ -1038,6 +1694,61 @@ class FinderApp:
             self.hide_popup()
             self.refresh_all()
             return "break"
+        if item.kind == "copy":
+            self._set_clipboard(item.target)
+            self.hide_popup()
+            return "break"
+        if item.kind in ("clip", "emoji"):
+            self._paste_text(item.target)
+            return "break"
+        if item.kind == "note":
+            try:
+                quick.append_note(self.notes_path, item.target)
+            except OSError as error:
+                messagebox.showerror("Not kaydedilemedi", str(error), parent=self.root)
+            else:
+                self.hide_popup()
+            return "break"
+        if item.kind == "notefile":
+            self.notes_path.touch(exist_ok=True)
+            self._open_path_or_error(item.target, "Not dosyası açılamadı")
+            return "break"
+        if item.kind == "themefile":
+            self._open_path_or_error(str(usertheme.ensure_example(item.target)), "Tema dosyası açılamadı")
+            return "break"
+        if item.kind == "timer":
+            seconds, _, label = item.target.partition("|")
+            self._start_timer(int(seconds), label)
+            self.hide_popup()
+            return "break"
+        if item.kind == "system":
+            action = sysactions.get_action(item.target)
+            if action is None:
+                return "break"
+            if action.confirm:
+                self._suspend_hide = True
+                try:
+                    if not messagebox.askyesno("DosyaBul", f"{action.name}\n\nDevam edilsin mi?", parent=self.root, default="no"):
+                        return "break"
+                finally:
+                    self._suspend_hide = False
+            try:
+                self.hide_popup()
+                sysactions.run_action(action)
+            except OSError as error:
+                self.show_popup()
+                messagebox.showerror("Komut çalıştırılamadı", str(error), parent=self.root)
+            return "break"
+        if item.kind.startswith("custom:"):
+            self._run_custom(item)
+            return "break"
+        if item.kind == "script":
+            self._run_script_async(item.target)
+            return "break"
+        if item.kind == "scriptline":
+            if self._script_active:
+                self._run_script_async(self._script_active, item.target)
+            return "break"
         if item.kind == "quit":
             self._suspend_hide = True
             try:
@@ -1046,6 +1757,24 @@ class FinderApp:
             finally:
                 self._suspend_hide = False
             self.quit_app()
+            return "break"
+        if item.kind == "ssh":
+            try:
+                self.hide_popup()
+                launch_terminal_command(f"ssh {item.target}", self.settings.terminal_directory, self.settings.terminal_application)
+            except (OSError, ValueError) as error:
+                self.show_popup()
+                messagebox.showerror("SSH başlatılamadı", str(error), parent=self.root)
+            else:
+                self._record_usage(item)
+            return "break"
+        if item.kind == "process":
+            try:
+                rofi_modes.kill_process(int(item.target))
+            except (OSError, ValueError) as error:
+                messagebox.showerror("Süreç sonlandırılamadı", str(error), parent=self.root)
+            else:
+                self._schedule_search(0)
             return "break"
         if item.kind == "command":
             try:
@@ -1117,6 +1846,8 @@ class FinderApp:
         except OSError as error:
             self.show_popup()
             messagebox.showerror("Öğe açılamadı", str(error), parent=self.root)
+        else:
+            self._record_usage(item)
         return "break"
 
     def _needs_confirmation(self, item: ResultItem) -> bool:
@@ -1137,6 +1868,141 @@ class FinderApp:
                 messagebox.showerror("Konum açılamadı", str(error), parent=self.root)
         return "break"
 
+    def secondary_selected(self):
+        """Alt+Enter: öğeye göre ikincil eylem."""
+        item = self._selected_item()
+        if not item:
+            return "break"
+        if item.kind == "process":
+            self._set_clipboard(str(item.target))
+            self.status_var.set(f"PID {item.target} kopyalandı.")
+            return "break"
+        if item.kind == "window":
+            try:
+                window_tools.close_window(int(item.target))
+            except (TypeError, ValueError):
+                pass
+            self.root.after(350, lambda: self._schedule_search(0))
+            return "break"
+        if item.kind in ("file", "directory"):
+            folder = item.path if item.kind == "directory" else str(Path(item.path).parent)
+            try:
+                self.hide_popup()
+                launch_terminal_command("Get-Location", folder, self.settings.terminal_application)
+            except (OSError, ValueError) as error:
+                self.show_popup()
+                messagebox.showerror("Terminal açılamadı", str(error), parent=self.root)
+            return "break"
+        if item.kind.startswith("app:") and item.target and os.path.isfile(item.target):
+            try:
+                import ctypes
+                self.hide_popup()
+                result = ctypes.windll.shell32.ShellExecuteW(None, "runas", item.target, None, None, 1)
+                if result <= 32 and result != 5:
+                    raise OSError("Uygulama yönetici olarak başlatılamadı.")
+            except (OSError, AttributeError) as error:
+                self.show_popup()
+                messagebox.showerror("Uygulama açılamadı", str(error), parent=self.root)
+            return "break"
+        return "break"
+
+    def delete_clip_selected(self):
+        item = self._selected_item()
+        if not item or item.kind != "clip":
+            return None
+        if item.target in self.clipboard._entries:
+            self.clipboard._entries.remove(item.target)
+        self._schedule_search(0)
+        return "break"
+
+    def preview_selected(self):
+        """Ctrl+I: seçili dosyanın içeriğinden küçük bir önizleme ya da bilgi gösterir."""
+        item = self._selected_item()
+        if not item or item.kind not in ("file", "directory"):
+            return "break"
+        path = Path(item.path)
+        try:
+            stat = path.stat()
+        except OSError as error:
+            messagebox.showerror("Önizleme", str(error), parent=self.root)
+            return "break"
+        from datetime import datetime
+        if path.is_dir():
+            try:
+                names = sorted(entry.name for entry in path.iterdir())
+            except OSError:
+                names = []
+            body = f"{len(names)} öğe\n\n" + "\n".join(names[:40]) + ("\n…" if len(names) > 40 else "")
+        else:
+            size = stat.st_size
+            body = f"Boyut: {format_count(size)} bayt\n"
+            body += f"Değişiklik: {datetime.fromtimestamp(stat.st_mtime):%Y-%m-%d %H:%M}\n\n"
+            if size <= 5_000_000 and path.suffix.casefold() not in actions.EXECUTABLE_EXTENSIONS:
+                try:
+                    raw = path.read_bytes()[:4096]
+                except OSError:
+                    raw = b""
+                if raw and b"\0" not in raw:
+                    for encoding in ("utf-8", "cp1254"):
+                        try:
+                            body += raw.decode(encoding)
+                            break
+                        except UnicodeDecodeError:
+                            continue
+        theme = self._palette()
+        self._suspend_hide = True
+        window = tk.Toplevel(self.root)
+        window.title(path.name)
+        window.configure(bg=theme.background, highlightbackground=theme.border, highlightthickness=2)
+        window.attributes("-topmost", True)
+        tk.Label(window, text=path.name, bg=theme.background, fg=theme.border, font=(FONT_FAMILY, 11, "bold"), anchor="w").pack(fill="x", padx=14, pady=(10, 2))
+        tk.Label(window, text=str(path.parent), bg=theme.background, fg=theme.muted, font=(FONT_FAMILY, 8), anchor="w").pack(fill="x", padx=14)
+        box = tk.Text(window, width=70, height=18, bg=theme.surface, fg=theme.text, relief="flat", font=(FONT_FAMILY, 9), wrap="word", borderwidth=0)
+        box.insert("1.0", body)
+        box.configure(state="disabled")
+        box.pack(padx=14, pady=10)
+
+        def close(_event=None):
+            self._suspend_hide = False
+            window.destroy()
+            if self.visible:
+                self.focus_search()
+
+        window.bind("<Escape>", close)
+        window.bind("<Return>", close)
+        window.protocol("WM_DELETE_WINDOW", close)
+        window.update_idletasks()
+        area = active_work_area(self.root)
+        width, height = window.winfo_reqwidth(), window.winfo_reqheight()
+        window.geometry(f"+{area.left + (area.width - width) // 2}+{area.top + (area.height - height) // 3}")
+        window.focus_force()
+        return "break"
+
+    def pin_selected(self):
+        item = self._selected_item()
+        if not item or not item.target:
+            return "break"
+        kind = item.kind if (item.kind.startswith("app:") or item.kind in ("file", "directory")) else "app:shortcut"
+        self.pins.pin(item.target, name=item.name, kind=kind)
+        self.status_var.set(f"{item.name} DosyaBul'a sabitlendi.")
+        self._cancel_timer("_toast_after")
+        self._toast_after = self.root.after(2000, self._clear_toast)
+        if not self.query_var.get().strip():
+            self._schedule_search(0)
+        return "break"
+
+    def unpin_selected(self):
+        item = self._selected_item()
+        if not item or not item.target:
+            return "break"
+        if self.pins.unpin(item.target):
+            self.status_var.set(f"{item.name} sabitlemesi kaldırıldı.")
+            self._cancel_timer("_toast_after")
+            self._toast_after = self.root.after(2000, self._clear_toast)
+            if not self.query_var.get().strip():
+                self._schedule_search(0)
+        return "break"
+
     def copy_selected(self):
         item = self._selected_item()
         if item:
@@ -1153,11 +2019,12 @@ class FinderApp:
 
     # ---- Kısayol --------------------------------------------------------
 
-    def _rebind_hotkey(self, spec: HotkeySpec) -> tuple[bool, str | None]:
+    def _rebind_hotkey(self, spec: HotkeySpec, *, win_search_override: bool | None = None) -> tuple[bool, str | None]:
         spec = spec.normalized()
-        if not self._hotkey_enabled or (self._hotkey and spec == self._hotkey.spec):
+        win_override = self.settings.win_search_override if win_search_override is None else bool(win_search_override)
+        if not self._hotkey_enabled or (self._hotkey and spec == self._hotkey.spec and win_override == self._hotkey.win_search_override):
             return True, None
-        candidate = HotkeyService(lambda: self.events.put(("toggle",)), spec=spec)
+        candidate = HotkeyService(lambda: self.events.put(("toggle",)), spec=spec, win_search_override=win_override, show_callback=lambda: self.events.put(("show",)))
         if candidate.start():
             previous = self._hotkey
             self._hotkey = candidate
@@ -1184,7 +2051,7 @@ class FinderApp:
         window.title("DosyaBul Ayarları")
         window.configure(bg=theme.background)
         window.resizable(False, False)
-        window.transient(self.root)
+        window.attributes("-topmost", True)
 
         hotkey_var = tk.StringVar(value=self.settings.hotkey)
         hotkey_hint_var = tk.StringVar(value="Alana tıkla, ardından istediğin tuş birleşimine bas.")
@@ -1209,13 +2076,22 @@ class FinderApp:
         windows_var = tk.BooleanVar(value=self.settings.search_windows)
         confirm_var = tk.BooleanVar(value=self.settings.confirm_executables)
         tray_var = tk.BooleanVar(value=self.settings.minimize_to_tray)
+        clipboard_var = tk.BooleanVar(value=self.settings.clipboard_history)
+        win_search_var = tk.BooleanVar(value=self.settings.win_search_override)
         startup_was_enabled = is_startup_enabled()
         startup_var = tk.BooleanVar(value=startup_was_enabled)
         show_startup_var = tk.BooleanVar(value=self.settings.show_on_startup)
         directory_var = tk.StringVar(value=self.settings.terminal_directory)
 
-        content = tk.Frame(window, bg=theme.background)
-        content.pack(fill="both", expand=True, padx=18, pady=12)
+        holder = tk.Canvas(window, bg=theme.background, highlightthickness=0, borderwidth=0)
+        holder.pack(side="left", fill="both", expand=True)
+        scrollbar = tk.Scrollbar(window, orient="vertical", command=holder.yview)
+        holder.configure(yscrollcommand=scrollbar.set)
+        content = tk.Frame(holder, bg=theme.background)
+        content_id = holder.create_window((18, 12), window=content, anchor="nw")
+        content.bind("<Configure>", lambda _event: holder.configure(scrollregion=holder.bbox("all")))
+        holder.bind("<Configure>", lambda event: holder.itemconfigure(content_id, width=max(100, event.width - 36)))
+        window.bind("<MouseWheel>", lambda event: holder.yview_scroll(-1 if event.delta > 0 else 1, "units"))
         tk.Label(content, text="Rofi ayarları", bg=theme.background, fg=theme.text, font=(FONT_FAMILY, 17, "bold"), anchor="w").grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         content.columnconfigure(1, weight=1)
 
@@ -1331,6 +2207,7 @@ class FinderApp:
 
         checks = tk.Frame(content, bg=theme.background)
         checks.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 2))
+        checks.columnconfigure((0, 1), weight=1, uniform="checks")
         row += 1
 
         def check(text, variable, row_index, column):
@@ -1346,8 +2223,10 @@ class FinderApp:
         check("Başlangıçta paneli göster", show_startup_var, 3, 1)
         check("Çalıştırılabilir dosyada onay iste", confirm_var, 4, 0)
         check("Kapatınca sistem tepsisine küçült", tray_var, 4, 1)
+        check("Pano geçmişini kaydet (yalnızca bellekte)", clipboard_var, 5, 0)
+        check("Win tuşu ve Başlat aramasını devral", win_search_var, 5, 1)
 
-        tk.Label(content, text="Web: !arama   ·   Komut: /komut   ·   Kaldır: -r program   ·   Ayarlar: -s   ·   Yardım: -h   ·   Kip: Ctrl+K veya Tab", bg=theme.background, fg=theme.muted, font=(FONT_FAMILY, 9), anchor="w").grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+        tk.Label(content, text="Web: !arama   ·   Komut: /komut   ·   Kaldır: -r program   ·   Ayarlar: -s   ·   Yardım: -h   ·   Kip: Ctrl+K veya Tab", bg=theme.background, fg=theme.muted, font=(FONT_FAMILY, 9), anchor="w", justify="left", wraplength=520).grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
         row += 1
         actions_box = tk.Frame(content, bg=theme.background)
         actions_box.grid(row=row, column=0, columnspan=3, sticky="e", pady=(3, 0))
@@ -1371,6 +2250,7 @@ class FinderApp:
             selected_hotkey = self._settings_hotkey_spec or self.settings.hotkey_spec
             updated = AppSettings(
                 hotkey=format_hotkey(selected_hotkey), hotkey_modifiers=selected_hotkey.modifiers, hotkey_key=selected_hotkey.key,
+                win_search_override=win_search_var.get(),
                 visible_rows=int(rows_var.get()), opacity=opacity_var.get(), panel_width=width_var.get(),
                 panel_position=position_var.get(), monitor_mode=monitor_var.get(), search_engine=engine_var.get(),
                 hide_on_focus_loss=hide_var.get(), refresh_on_start=refresh_var.get(),
@@ -1379,9 +2259,10 @@ class FinderApp:
                 terminal_application=terminal_var.get(), terminal_directory=directory_var.get(),
                 font_size=size_var.get(), row_scale=rowscale_var.get(), theme=theme_var.get(),
                 accent_color=accent_var.get(), default_mode=mode_var.get(), confirm_executables=confirm_var.get(),
-                minimize_to_tray=tray_var.get(),
+                minimize_to_tray=tray_var.get(), clipboard_history=clipboard_var.get(),
+                web_shortcuts=self.settings.web_shortcuts,
             ).normalized()
-            changed, error = self._rebind_hotkey(updated.hotkey_spec)
+            changed, error = self._rebind_hotkey(updated.hotkey_spec, win_search_override=updated.win_search_override)
             if not changed:
                 messagebox.showerror("Kısayol kullanılamıyor", f"{updated.hotkey} başka bir uygulama tarafından kullanılıyor.\n\n{error}", parent=window)
                 return
@@ -1389,7 +2270,7 @@ class FinderApp:
                 set_startup(startup_var.get(), updated.show_on_startup)
                 self.settings = self.settings_store.save(updated)
             except OSError as error:
-                self._rebind_hotkey(self.settings.hotkey_spec)
+                self._rebind_hotkey(self.settings.hotkey_spec, win_search_override=self.settings.win_search_override)
                 try:
                     set_startup(startup_was_enabled, self.settings.show_on_startup)
                 except OSError:
@@ -1406,12 +2287,18 @@ class FinderApp:
         window.protocol("WM_DELETE_WINDOW", close_dialog)
         window.bind("<Escape>", lambda _event: close_dialog())
         window.update_idletasks()
-        width, height = 560, window.winfo_reqheight()
         area = active_work_area(self.root)
+        width = min(max(560, content.winfo_reqwidth() + 40), area.width - 40)
+        needed = content.winfo_reqheight() + 28
+        height = min(needed, area.height - 80)
+        if needed > height:
+            scrollbar.pack(side="right", fill="y")
         x = area.left + (area.width - width) // 2
         y = area.top + max(20, (area.height - height) // 2)
         window.geometry(f"{width}x{height}+{x}+{y}")
+        window.deiconify()
         window.lift()
+        activate_window(window)
         hotkey_button.focus_set()
         return "break"
 
@@ -1420,21 +2307,29 @@ class FinderApp:
         theme = self._palette()
         self.panel_border.configure(bg=theme.border)
         self.main_frame.configure(bg=theme.background)
-        self.search_box.configure(bg=theme.accent)
+        if hasattr(self, "search_wrapper"):
+            self.search_wrapper.configure(bg=theme.background)
+        self.search_box.configure(bg=theme.accent, highlightbackground=theme.border)
         self.search_canvas.configure(bg=theme.accent)
-        self.search_canvas.itemconfigure(self._search_oval, outline=theme.accent_text)
+        self.search_canvas.itemconfigure(self._search_oval, fill=theme.accent_text)
         self.search_canvas.itemconfigure(self._search_line, fill=theme.accent_text)
         self.entry_box.configure(bg=theme.accent)
         self.search_entry.configure(bg=theme.accent, fg=theme.accent_text, insertbackground=theme.accent_text,
                                     selectbackground=theme.background, selectforeground=theme.accent_text)
         self.placeholder.configure(bg=theme.accent, fg=theme.text)
-        self.mode_chip.configure(bg=theme.accent, fg=theme.accent_text)
+        self.mode_chip.configure(bg=theme.accent, fg=theme.text)
         self.table_box.configure(bg=theme.background)
+        if hasattr(self, "grid_canvas"):
+            self.grid_canvas.configure(bg=theme.background)
+            self._draw_grid()
         self.empty_label.configure(bg=theme.background, fg=theme.muted)
 
     def _apply_settings(self):
+        self.config = usertheme.load_config(usertheme.theme_path(self.data_dir))
+        self._mode_order = tuple(self.config.get("modes") or MODE_ORDER)
         self._theme = self._resolve_theme()
         self._icon_cache.clear()
+        self._raw_icon_cache.clear()
         self._configure_styles()
         self._make_icons()
         self._recolor_widgets()
@@ -1612,6 +2507,10 @@ class FinderApp:
                     if self._pending_open_generation == generation:
                         self._pending_open_generation = None
                         self.open_selected()
+            elif event[0] == "script":
+                _, generation, script, argument, lines, error = event
+                if generation == self._search_generation:
+                    self._script_finished(script, argument, lines, error)
             elif event[0] == "roots":
                 self._drive_paths = event[1]
             elif event[0] == "progress":
@@ -1630,9 +2529,31 @@ class FinderApp:
                     if self.query_var.get().strip() and not self.query_var.get().lstrip().startswith("/"):
                         self._schedule_search(0)
             elif event[0] == "toggle":
-                self.toggle_popup()
+                if self._settings_window and self._settings_window.winfo_exists():
+                    self._settings_window.deiconify()
+                    self._settings_window.lift()
+                    activate_window(self._settings_window)
+                else:
+                    self._settings_window = None
+                    self._suspend_hide = False
+                    self.toggle_popup()
+            elif event[0] == "show":
+                if self._settings_window and self._settings_window.winfo_exists():
+                    self._settings_window.deiconify()
+                    self._settings_window.lift()
+                    activate_window(self._settings_window)
+                else:
+                    self._settings_window = None
+                    self._suspend_hide = False
+                    self.show_popup()
             elif event[0] == "tray_toggle":
                 self.toggle_popup()
+            elif event[0] == "tray_settings":
+                self.open_settings()
+            elif event[0] == "tray_refresh":
+                self.refresh_all()
+            elif event[0] == "tray_quit":
+                self.quit_app()
             elif event[0] == "tray_menu":
                 self._tray_menu()
         self._event_after = self.root.after(50, self._drain_events)
@@ -1650,6 +2571,7 @@ class FinderApp:
             tooltip="DosyaBul",
             on_select=lambda: self.events.put(("tray_toggle",)),
             on_context=lambda: self.events.put(("tray_menu",)),
+            on_action=lambda action: self.events.put((action,)),
             icon_handle=handle,
         )
         if icon.start():
@@ -1664,10 +2586,10 @@ class FinderApp:
         theme = self._palette()
         menu = tk.Menu(self.root, tearoff=False, font=(FONT_FAMILY, 10))
         menu.add_command(label="Göster / Gizle", command=lambda: self.events.put(("tray_toggle",)))
-        menu.add_command(label="Ayarlar", command=self.open_settings)
-        menu.add_command(label="Yenile", command=self.refresh_all)
+        menu.add_command(label="Ayarlar", command=lambda: self.events.put(("tray_settings",)))
+        menu.add_command(label="Yenile", command=lambda: self.events.put(("tray_refresh",)))
         menu.add_separator()
-        menu.add_command(label="Çıkış", command=self.quit_app)
+        menu.add_command(label="Çıkış", command=lambda: self.events.put(("tray_quit",)))
         try:
             self._suspend_hide = True
             menu.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
@@ -1701,11 +2623,13 @@ class FinderApp:
         self._scan_cancel.set()
         if self._search_cancel:
             self._search_cancel.set()
-        for name in ("_search_after", "_event_after", "_auto_after", "_toast_after", "_focus_after"):
+        for name in ("_search_after", "_event_after", "_auto_after", "_toast_after", "_focus_after", "_clip_after"):
             self._cancel_timer(name)
         if self._tray is not None:
             self._tray.stop()
             self._tray = None
+        if self._watcher:
+            self._watcher.stop()
         if self._hotkey:
             self._hotkey.stop()
         self.executor.shutdown(wait=False, cancel_futures=True)

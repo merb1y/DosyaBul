@@ -1,12 +1,12 @@
 import json
 import os
 import tempfile
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from .applications import TERMINAL_CHOICES
 from .hotkey import DEFAULT_SPEC, HotkeySpec, format_hotkey, parse_hotkey
-from .websearch import SEARCH_ENGINES
+from .websearch import DEFAULT_SHORTCUTS, SEARCH_ENGINES, clean_shortcuts
 
 ROW_CHOICES = (5, 7, 10, 12)
 POSITION_CHOICES = (
@@ -15,8 +15,14 @@ POSITION_CHOICES = (
     "Alt sol", "Alt orta", "Alt sağ",
 )
 MONITOR_CHOICES = ("Fare imlecinin ekranı", "Ana ekran", "Etkin pencerenin ekranı")
-MODE_CHOICES = ("Tümü", "Uygulamalar", "Dosyalar", "Komutlar", "Web", "Pencereler")
-THEME_CHOICES = ("KooL Mocha", "Nord", "Gruvbox", "Tokyo Night", "Solarized")
+MODE_CHOICES = (
+    "Tümü", "Uygulamalar", "Dosyalar", "Komutlar", "Web", "Pencereler",
+    "SSH", "Süreçler", "Pano", "Emoji", "Sistem", "Betikler",
+)
+THEME_CHOICES = (
+    "KooL Mocha", "Catppuccin Mocha", "Dracula", "Rosé Pine",
+    "Nord", "Gruvbox", "Tokyo Night", "Solarized",
+)
 
 
 def clean_color(value: str) -> str:
@@ -36,6 +42,7 @@ class AppSettings:
     hotkey: str = format_hotkey(DEFAULT_SPEC)
     hotkey_modifiers: int = DEFAULT_SPEC.modifiers
     hotkey_key: int = DEFAULT_SPEC.key
+    win_search_override: bool = True
     visible_rows: int = 10
     opacity: int = 97
     panel_width: int = 600
@@ -58,6 +65,8 @@ class AppSettings:
     default_mode: str = "Uygulamalar"
     confirm_executables: bool = True
     minimize_to_tray: bool = True
+    clipboard_history: bool = True
+    web_shortcuts: dict = field(default_factory=lambda: dict(DEFAULT_SHORTCUTS))
     settings_version: int = 2
 
     @property
@@ -73,6 +82,7 @@ class AppSettings:
             hotkey=format_hotkey(spec),
             hotkey_modifiers=spec.modifiers,
             hotkey_key=spec.key,
+            win_search_override=bool(self.win_search_override),
             visible_rows=self.visible_rows if self.visible_rows in ROW_CHOICES else 10,
             opacity=max(85, min(100, int(self.opacity))),
             panel_width=max(320, min(800, int(self.panel_width))),
@@ -95,6 +105,8 @@ class AppSettings:
             default_mode=self.default_mode if self.default_mode in MODE_CHOICES else "Uygulamalar",
             confirm_executables=bool(self.confirm_executables),
             minimize_to_tray=bool(self.minimize_to_tray),
+            clipboard_history=bool(self.clipboard_history),
+            web_shortcuts=clean_shortcuts(self.web_shortcuts),
             settings_version=2,
         )
 

@@ -41,8 +41,10 @@ New-Item -ItemType Directory -Path $ProgramsDir -Force | Out-Null
 $copied = $false
 for ($attempt = 1; $attempt -le 20 -and -not $copied; $attempt++) {
     try {
-        # onedir modunda exe ve _internal klasörünün tamamı kopyalanır.
-        Copy-Item -Path (Join-Path $sourceDir '*') -Destination $installDir -Recurse -Force
+        # onedir modunda exe ve _internal klasörünün tamamı kopyalanır (alt süreçlerin kilitlediği aynı boyuttaki DLL'ler atlanır).
+        Copy-Item -Path (Join-Path $sourceDir 'DosyaBul.exe') -Destination (Join-Path $installDir 'DosyaBul.exe') -Force
+        Copy-Item -Path (Join-Path $sourceDir '_internal') -Destination $installDir -Recurse -Force -ErrorAction SilentlyContinue
+        Copy-Item -Path (Join-Path $sourceDir '_internal\base_library.zip') -Destination (Join-Path $installDir '_internal\base_library.zip') -Force
         $copied = $true
     } catch [System.IO.IOException] {
         if ($attempt -eq 20) { throw }
@@ -62,6 +64,20 @@ $menuLink.WorkingDirectory = $installDir
 $menuLink.IconLocation = "$target,0"
 $menuLink.Description = 'DosyaBul'
 $menuLink.Save()
+
+$contextKeys = @(
+    'HKCU:\Software\Classes\exefile\shell\DosyaBulPin',
+    'HKCU:\Software\Classes\lnkfile\shell\DosyaBulPin',
+    'HKCU:\Software\Classes\InternetShortcut\shell\DosyaBulPin',
+    'HKCU:\Software\Classes\SystemFileAssociations\.exe\shell\DosyaBulPin',
+    'HKCU:\Software\Classes\SystemFileAssociations\.lnk\shell\DosyaBulPin'
+)
+foreach ($regPath in $contextKeys) {
+    New-Item -Path "$regPath\command" -Force | Out-Null
+    Set-ItemProperty -Path $regPath -Name '(Default)' -Value "DosyaBul'a sabitle"
+    Set-ItemProperty -Path $regPath -Name 'Icon' -Value "`"$target`",0"
+    Set-ItemProperty -Path "$regPath\command" -Name '(Default)' -Value "`"$target`" --pin `"%1`""
+}
 
 if (-not $NoLaunch) {
     Start-Process -FilePath $target

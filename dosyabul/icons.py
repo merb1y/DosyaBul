@@ -22,7 +22,7 @@ SLGP_RAWPATH = 0x00000004
 SIIGBF_BIGGERSIZEOK = 0x00000001
 SIIGBF_ICONONLY = 0x00000004
 
-ICON_SIZE = 32
+ICON_SIZE = 44
 
 
 class GUID(ctypes.Structure):
@@ -144,7 +144,7 @@ else:
 _com_ready = threading.local()
 
 
-def _bitmap_to_image(hbitmap):
+def _bitmap_to_image(hbitmap, hmask=None):
     """HBITMAP'i (genislik, yukseklik, RGBA bytes) olarak dondurur."""
     bitmap = BITMAP()
     if not _gdi32.GetObjectW(hbitmap, ctypes.sizeof(bitmap), ctypes.byref(bitmap)):
@@ -163,9 +163,16 @@ def _bitmap_to_image(hbitmap):
     buffer = ctypes.create_string_buffer(width * height * 4)
     dib = BITMAPINFO()
     dib.bmiHeader = header
+    mask_raw = None
     screen = _user32.GetDC(0)
     try:
         ok = _gdi32.GetDIBits(screen, hbitmap, 0, height, buffer, ctypes.byref(dib), DIB_RGB_COLORS)
+        if ok and hmask:
+            mask_buf = ctypes.create_string_buffer(width * height * 4)
+            mask_dib = BITMAPINFO()
+            mask_dib.bmiHeader = header
+            if _gdi32.GetDIBits(screen, hmask, 0, height, mask_buf, ctypes.byref(mask_dib), DIB_RGB_COLORS):
+                mask_raw = mask_buf.raw
     finally:
         if screen:
             _user32.ReleaseDC(0, screen)
@@ -183,8 +190,12 @@ def _bitmap_to_image(hbitmap):
         pixels[i + 2] = b
         pixels[i + 3] = a
     if not any_alpha:
-        for i in range(3, len(pixels), 4):
-            pixels[i] = 255
+        if mask_raw is not None:
+            for i in range(0, len(pixels), 4):
+                pixels[i + 3] = 0 if (mask_raw[i] or mask_raw[i + 1] or mask_raw[i + 2]) else 255
+        else:
+            for i in range(3, len(pixels), 4):
+                pixels[i] = 255
     return width, height, bytes(pixels)
 
 
@@ -196,7 +207,7 @@ def _hicon_to_image(hicon):
     try:
         if not info.hbmColor:
             return None
-        return _bitmap_to_image(info.hbmColor)
+        return _bitmap_to_image(info.hbmColor, info.hbmMask)
     finally:
         if info.hbmColor:
             _gdi32.DeleteObject(info.hbmColor)

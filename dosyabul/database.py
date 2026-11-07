@@ -216,6 +216,49 @@ class IndexDatabase:
         )
         return SearchResults(files, total, len(files), limit)
 
+
+    def remove_path(self, path: str | Path) -> None:
+        target = str(Path(path))
+        with self._lock, self._connection:
+            self._connection.execute("DELETE FROM items WHERE path = ?", (target,))
+
+    def upsert_path(self, path: str | Path) -> None:
+        target_path = Path(path)
+        try:
+            stat = target_path.stat()
+            is_dir = target_path.is_dir()
+        except OSError:
+            self.remove_path(target_path)
+            return
+        target = str(target_path)
+        parent = str(target_path.parent)
+        name = target_path.name
+        if not name:
+            return
+        folded = fold_text(name)
+        kind = "directory" if is_dir else "file"
+        ext = "" if is_dir else target_path.suffix.casefold().lstrip(".")
+        size = 0 if is_dir else int(stat.st_size)
+        modified = float(stat.st_mtime)
+        with self._lock, self._connection:
+            roots = self._connection.execute("SELECT id, path FROM roots").fetchall()
+            root_id = None
+            norm_target = os.path.normcase(target)
+            for row in roots:
+                if norm_target.startswith(os.path.normcase(row["path"])):
+                    root_id = row["id"]
+                    break
+            if root_id is None and roots:
+                root_id = roots[0]["id"]
+            if root_id is None:
+                return
+            self._connection.execute("DELETE FROM items WHERE path = ?", (target,))
+            self._connection.execute(
+                "INSERT INTO items(root_id, parent, name, folded, path, kind, extension, size, modified) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (root_id, parent, name, folded, target, kind, ext, size, modified),
+            )
+
     def lookup(self, item_id: int) -> FileResult | None:
         with self._lock:
             row = self._connection.execute(

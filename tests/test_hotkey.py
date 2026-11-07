@@ -1,8 +1,8 @@
 import unittest
 
 from dosyabul.hotkey import (
-    DEFAULT_SPEC, MOD_ALT, MOD_CONTROL, HotkeySpec,
-    captured_hotkey, format_hotkey, parse_hotkey, parse_key,
+    DEFAULT_SPEC, MOD_ALT, MOD_CONTROL, MOD_WIN, VK_LWIN, WIN_SOLO_SPEC,
+    HotkeySpec, captured_hotkey, format_hotkey, parse_hotkey, parse_key,
 )
 
 
@@ -14,6 +14,12 @@ class ParseHotkeyTests(unittest.TestCase):
 
     def test_default_when_blank(self):
         self.assertEqual(parse_hotkey(""), DEFAULT_SPEC)
+
+    def test_solo_win_parses_and_formats(self):
+        spec = parse_hotkey("Win")
+        self.assertEqual(spec, WIN_SOLO_SPEC)
+        self.assertTrue(spec.is_solo_win)
+        self.assertEqual(format_hotkey(spec), "Win")
 
     def test_missing_key_raises(self):
         with self.assertRaises(ValueError):
